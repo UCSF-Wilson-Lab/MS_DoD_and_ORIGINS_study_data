@@ -1,0 +1,914 @@
+---
+title: "Plot Luminex Figures"
+output: html_document
+---
+
+# START
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+library(gplots)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(png)
+library(ggplot2) 
+library(cowplot)
+library(ggrepel)
+library(plotly) 
+library(uwot)
+library(gridExtra)
+library(seqinr)
+library(DECIPHER)
+library(Biostrings)
+library(text.alignment)
+
+ANTIGEN_LIST <- c("CLASRP","RIMS2","HFM","EBV BRRF2","KRT75","SRRM3","TRIO","BSA","CD320 epitope","Aspergillus","SRSF4","E. Coli","Pseudomonas","EBV ENV")
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+
+# Patients to omit from ORIGINS figures
+patients_to_omit_fh <- "resources/Patients_to_omit_all_figures.csv"
+omit_df             <- read.csv(patients_to_omit_fh,stringsAsFactors = F)
+
+# luminex data
+luminex_data_dir <- "Luminex_Data/processed_luminex_tables"
+luminex_plot_df_fh      <- file.path(luminex_data_dir,"plot_df_Luminex_sum_RPK_revised_processed.tsv")
+luminex_long_plot_df_fh <- file.path(luminex_data_dir,"long_plot_df_Luminex_revised_processed.tsv")
+
+# Origins variables RData
+origins_plot_variables_fh <- "Luminex_Data/processed_luminex_tables/origins_variables_for_plots.RData"
+load(origins_plot_variables_fh)
+
+# Diagnosis metadata
+metadata <- read.csv("data_origins/ORIGINSEPICPatientSamples.csv",stringsAsFactors = F) %>% clean_names()
+
+PLOT_DIR  <- "plots"
+TABLE_DIR <- "Luminex_Data/processed_luminex_tables"
+```
+
+
+# -------------------------------------
+
+# FIGURE 4 - LUMINEX 
+
+# 1. load data
+
+### a. plot dataframes
+```{r}
+lux_df <- read.delim(luminex_plot_df_fh,stringsAsFactors = F,check.names = F)
+lux_df_long <- read.delim(luminex_long_plot_df_fh,stringsAsFactors = F,check.names = F)
+
+# Change final diagnosis to NID_csf for NID patients
+nids      <- lux_df$Sample[grep("^NID",lux_df$Sample)]
+nids_long <- lux_df_long$Patient[grep("^NID",lux_df_long$Patient)]
+
+lux_df[lux_df$Sample %in% nids,"final_diagnosis"] <- "NID_csf"
+lux_df_long[lux_df_long$Patient %in% nids_long,"final_diagnosis"] <- "NID_csf"
+
+# Levels
+lux_df$final_diagnosis <- factor(lux_df$final_diagnosis, levels = c( "MS_serum" , "MS_csf", "OND_serum" , "OND_csf", "Healthy_serum" , "Healthy_csf" ,"CIS_serum", "CIS_csf" , "RIS_serum" , "RIS_csf","Unknown_serum","Unknown_csf","NID_csf"))
+```
+
+
+# 2. Filter/format dataframes
+
+### a. only keep tp a
+```{r}
+# Patients to omit from Fig 4
+pts_to_omit <- paste(omit_df$Patient,"a",sep = "")
+
+# Must overlap with Fig 3 patients
+
+# Patients that don't overlap with Fig 3
+no_overlap_lux <- unique(lux_df$Patient[! lux_df$Patient %in% c(pt_ms_fig3a,pt_ctrl_fig3b)])
+no_overlap_lux_long <- unique(lux_df_long$Patient[! lux_df_long$Patient %in% c(pt_ms_fig3a,pt_ctrl_fig3b)])
+no_overlap_annot_df <- lux_df[lux_df$Patient %in% no_overlap_lux,]
+
+# Filter lux_df
+samples_lux <- lux_df$Patient
+samples_lux_a <- samples_lux[grep("a$",samples_lux)]
+samples_lux_a <- samples_lux_a[! samples_lux_a %in% pts_to_omit]
+lux_df        <- lux_df[lux_df$Patient %in% c(samples_lux_a,nids_long),]
+lux_df        <- lux_df[lux_df$Patient %in% c(pt_ms_fig3a,pt_ctrl_fig3b,nids_long),]
+
+# filter lux_df_long
+samples_lux_long <- lux_df_long$Patient
+samples_lux_long_a <- samples_lux_long[grep("a$",samples_lux_long)]
+samples_lux_long_a <- samples_lux_long_a[! samples_lux_long_a %in% pts_to_omit]
+lux_df_long        <- lux_df_long[lux_df_long$Patient %in% c(samples_lux_long_a,nids_long),]
+lux_df_long        <- lux_df_long[lux_df_long$Patient %in% c(pt_ms_fig3a,pt_ctrl_fig3b,nids_long),]
+```
+
+# 3. Filter for select antigens
+
+### a. autoantigens
+```{r}
+peptides_x_axis <- c("RIMS2","SRSF4", "TRIO", "KRT75","CLASRP","SRRM3")
+peptides_x_axis_pathogens <- c("EBV BRRF2","EBV ENV","HFM","Aspergillus","E. Coli","Pseudomonas")
+
+lux_df_long_pathogens     <- lux_df_long[lux_df_long$bead %in% peptides_x_axis_pathogens,]
+lux_df_long     <- lux_df_long[! lux_df_long$bead %in% peptides_x_axis_pathogens,]
+
+lux_df_long_filt <- lux_df_long %>% filter(final_diagnosis == "MS_csf") %>% mutate(bead = fct_relevel(bead, peptides_x_axis))
+lux_df_long_ms_serum <- lux_df_long %>% filter(final_diagnosis == "MS_serum") %>% mutate(bead = fct_relevel(bead, peptides_x_axis))
+lux_df_long_ond_csf <- lux_df_long %>% filter(final_diagnosis == "OND_csf") %>% mutate(bead = fct_relevel(bead, peptides_x_axis))
+lux_df_long_ond_serum <- lux_df_long %>% filter(final_diagnosis == "OND_serum") %>% mutate(bead = fct_relevel(bead, peptides_x_axis))
+```
+
+### b. pathogens
+```{r}
+lux_df_long_filt_pathogens <- lux_df_long_pathogens %>% filter(final_diagnosis == "MS_csf") %>% mutate(bead = fct_relevel(bead, peptides_x_axis_pathogens))
+lux_df_long_ms_serum_pathogens <- lux_df_long_pathogens %>% filter(final_diagnosis == "MS_serum") %>% mutate(bead = fct_relevel(bead, peptides_x_axis_pathogens))
+lux_df_long_ond_csf_pathogens <- lux_df_long_pathogens %>% filter(final_diagnosis == "OND_csf") %>% mutate(bead = fct_relevel(bead, peptides_x_axis_pathogens))
+lux_df_long_ond_serum_pathogens <- lux_df_long_pathogens %>% filter(final_diagnosis == "OND_serum") %>% mutate(bead = fct_relevel(bead, peptides_x_axis_pathogens))
+```
+
+
+# 4. MFI vs. RPK plots
+
+### --theme
+```{r}
+THEME_FIG4_MFI<- theme(legend.position = "top")+ theme(legend.position="none", 
+                                                   panel.background=element_blank(),
+                                                   panel.border=element_rect(fill = NA,colour ="black"),
+                                                   axis.title.x=element_blank(),
+                                                   axis.text=element_text(size=12),
+                                                   axis.ticks.x=element_blank(),
+                                                   axis.title.y=element_text(size=12),
+                                                   plot.background = element_blank())
+```
+
+### a. Make Plots
+
+```{r}
+# CSF sum RPK
+fig4a_csf_mfi_rpk <- lux_df %>% filter(final_diagnosis == "MS_csf") %>% ggplot(aes(x= pep_sum_mfi , y= sum_pep_pep_rpk)) + geom_point()+ geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "log(MFI / MFI bsa)",
+       y = "Reads per 100k (RPK)",
+       title = "CSF validation of sum of peptides") + scale_y_log10() + THEME_FIG4_MFI
+
+# Serum sum RPK
+fig4a_serum_mfi_rpk <- lux_df %>% filter(final_diagnosis == "MS_serum") %>% ggplot(aes(x= pep_sum_mfi , y= sum_pep_pep_rpk)) + geom_point() + geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "log(MFI / MFI bsa)",
+       y = "Reads per 100k (RPK)",
+       title = "serum validation of sum of peptides") + THEME_FIG4_MFI
+
+#### NO SRRM3
+
+# CSF sum RPK
+fig4a_csf_mfi_rpk_no_srrm3 <- lux_df %>% filter(final_diagnosis == "MS_csf") %>% ggplot(aes(x= pep_sum_mfi_no_SRRM3 , y= sum_pep_pep_rpk_no_SRRM3)) + geom_point()+ geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "log(MFI / MFI bsa)",
+       y = "Reads per 100k (RPK)",
+       title = "CSF validation of sum of peptides") + scale_y_log10() + THEME_FIG4_MFI
+
+# Serum sum RPK
+fig4a_serum_mfi_rpk_no_srrm3 <- lux_df %>% filter(final_diagnosis == "MS_serum") %>% ggplot(aes(x= pep_sum_mfi_no_SRRM3 , y= sum_pep_pep_rpk_no_SRRM3)) + geom_point() + geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "log(MFI / MFI bsa)",
+       y = "Reads per 100k (RPK)",
+       title = "serum validation of sum of peptides") + THEME_FIG4_MFI
+```
+
+
+### b. MFI MS vs cluster fold diff stats 
+
+```{r}
+fold_diff_lux      <- lux_df[,c("Patient","final_diagnosis","pep_sum_mfi","sum_pep_pep_rpk")]
+fold_diff_lux$type <- fold_diff_lux$Patient
+
+fold_diff_lux$type[fold_diff_lux$type %in% patients_origins_cluster] <- "cluster1and2"
+fold_diff_lux$type[! fold_diff_lux$type %in% "cluster1and2"]         <- "remaining"
+
+fold_diff_lux_csf <- fold_diff_lux[fold_diff_lux$final_diagnosis %in% c("MS_csf"),]
+fold_diff_lux_sera <- fold_diff_lux[fold_diff_lux$final_diagnosis %in% c("MS_serum"),]
+
+fold_diff_lux_ond_csf <- fold_diff_lux[fold_diff_lux$final_diagnosis %in% c("OND_csf"),]
+fold_diff_lux_ond_sera <- fold_diff_lux[fold_diff_lux$final_diagnosis %in% c("OND_serum"),]
+
+
+# sum MFI stats - MS (natural log sum MFI values)
+mean_mfi_sera    <- mean(fold_diff_lux_sera[fold_diff_lux_sera$type %in% "remaining","pep_sum_mfi"])
+mean_mfi_sera_ic <- mean(fold_diff_lux_sera[fold_diff_lux_sera$type %in% "cluster1and2","pep_sum_mfi"])
+sera_folddiff    <- mean_mfi_sera_ic /mean_mfi_sera
+
+mean_mfi_csf    <- mean(fold_diff_lux_csf[fold_diff_lux_csf$type %in% "remaining","pep_sum_mfi"])
+mean_mfi_csf_ic <- mean(fold_diff_lux_csf[fold_diff_lux_csf$type %in% "cluster1and2","pep_sum_mfi"])
+csf_folddiff    <- mean_mfi_csf_ic /mean_mfi_csf
+
+# sum MFI - OND
+mean_mfi_ond_csf <- mean(fold_diff_lux_ond_csf$pep_sum_mfi)
+mean_mfi_ond_sera <- mean(fold_diff_lux_ond_sera$pep_sum_mfi)
+
+ond_csf_folddiff <- mean_mfi_csf_ic / mean_mfi_ond_csf
+ond_sera_folddiff <- mean_mfi_sera_ic / mean_mfi_ond_sera
+```
+
+
+# 4.5 SumMFI MS autoantigen vs. pathogen
+
+```{r}
+# CSF sum RPK
+fig4a_csf_mfi_auto_pathogens <- lux_df %>% filter(final_diagnosis == "MS_csf") %>% ggplot(aes(x= pep_sum_mfi , y= pep_sum_mfi_pathogens)) + geom_point()+ geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "Autoantigen log(MFI / MFI bsa)",
+       y = "Pathogen log(MFI / MFI bsa)",
+       title = "MS CSF Autoantigen vs. Pathogen sum MFI") + scale_y_log10() + THEME_FIG4_MFI
+
+# Serum sum RPK
+fig4a_serum_mfi_auto_pathogens <- lux_df %>% filter(final_diagnosis == "MS_serum") %>% ggplot(aes(x= pep_sum_mfi , y= pep_sum_mfi_pathogens)) + geom_point() + geom_smooth(method=lm) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01) + labs(color = "Category",
+       x = "Autoantigen log(MFI / MFI bsa)",
+       y = "Pathogen log(MFI / MFI bsa)",
+       title = "MS Serum Autoantigen vs. Pathogen sum MFI") + THEME_FIG4_MFI
+```
+
+
+# 5. Line plots Prep
+
+### a. themes
+```{r}
+THEME_FIG4<- theme(legend.position = "top")+ theme(legend.position="none", 
+                                                   panel.background=element_blank(),
+                                                   panel.border=element_rect(fill = NA,colour ="black"),
+                                                   axis.title.x=element_blank(),
+                                                   axis.text=element_text(size=12),
+                                                   axis.ticks.x=element_blank(),
+                                                   axis.title.y=element_text(size=12),
+                                                   plot.background = element_blank())
+YLIM <- ylim(0,7)
+
+GROUP_COLORS <- c("remaining"="orange","Cluster1and2"="darkred")
+```
+
+### b. Add cluster column autoantigens
+```{r}
+# CSF 
+sample_type_col <- lux_df_long_filt$Patient
+sample_type_col[sample_type_col %in% patients_origins_cluster] <- "Cluster1and2"
+sample_type_col[! sample_type_col %in% "Cluster1and2"]           <- "remaining"
+lux_df_long_filt$sample_type <- sample_type_col
+
+# Serum
+sample_type_col <- lux_df_long_ms_serum$Patient
+sample_type_col[sample_type_col %in% patients_origins_cluster] <- "Cluster1and2"
+sample_type_col[! sample_type_col %in% "Cluster1and2"]           <- "remaining"
+lux_df_long_ms_serum$sample_type <- sample_type_col
+
+# Change levels - groups
+lux_df_long_filt$sample_type <- factor(lux_df_long_filt$sample_type,levels = c("remaining","Cluster1and2"))
+lux_df_long_ms_serum$sample_type <- factor(lux_df_long_ms_serum$sample_type,levels = c("remaining","Cluster1and2"))
+
+# Change levels - patients
+clus_patients <- lux_df_long_filt[lux_df_long_filt$sample_type %in% "Cluster1and2","Patient"] %>% unique()
+rem_patients <- lux_df_long_filt[lux_df_long_filt$sample_type %in% "remaining","Patient"] %>% unique()
+lux_df_long_filt$Patient <- factor(lux_df_long_filt$Patient,levels = c(rem_patients,clus_patients))
+
+clus_patients <- lux_df_long_ms_serum[lux_df_long_ms_serum$sample_type %in% "Cluster1and2","Patient"] %>% unique()
+rem_patients <- lux_df_long_ms_serum[lux_df_long_ms_serum$sample_type %in% "remaining","Patient"] %>% unique()
+lux_df_long_ms_serum$Patient <- factor(lux_df_long_ms_serum$Patient,levels = c(rem_patients,clus_patients))
+```
+
+### c. Add cluster column pathogens
+```{r}
+# CSF 
+sample_type_col <- lux_df_long_filt_pathogens$Patient
+sample_type_col[sample_type_col %in% patients_origins_cluster] <- "Cluster1and2"
+sample_type_col[! sample_type_col %in% "Cluster1and2"]           <- "remaining"
+lux_df_long_filt_pathogens$sample_type <- sample_type_col
+
+# Serum
+sample_type_col <- lux_df_long_ms_serum_pathogens$Patient
+sample_type_col[sample_type_col %in% patients_origins_cluster] <- "Cluster1and2"
+sample_type_col[! sample_type_col %in% "Cluster1and2"]           <- "remaining"
+lux_df_long_ms_serum_pathogens$sample_type <- sample_type_col
+
+# Change levels
+lux_df_long_filt_pathogens$sample_type <- factor(lux_df_long_filt_pathogens$sample_type,levels = c("Cluster1and2","remaining"))
+lux_df_long_ms_serum_pathogens$sample_type <- factor(lux_df_long_ms_serum_pathogens$sample_type,levels = c("Cluster1and2","remaining"))
+
+# Change levels - patients
+clus_patients <- lux_df_long_filt_pathogens[lux_df_long_filt_pathogens$sample_type %in% "Cluster1and2","Patient"] %>% unique()
+rem_patients <- lux_df_long_filt_pathogens[lux_df_long_filt_pathogens$sample_type %in% "remaining","Patient"] %>% unique()
+lux_df_long_filt_pathogens$Patient <- factor(lux_df_long_filt_pathogens$Patient,levels = c(rem_patients,clus_patients))
+
+clus_patients <- lux_df_long_ms_serum_pathogens[lux_df_long_ms_serum_pathogens$sample_type %in% "Cluster1and2","Patient"] %>% unique()
+rem_patients <- lux_df_long_ms_serum_pathogens[lux_df_long_ms_serum_pathogens$sample_type %in% "remaining","Patient"] %>% unique()
+lux_df_long_ms_serum_pathogens$Patient <- factor(lux_df_long_ms_serum_pathogens$Patient,levels = c(rem_patients,clus_patients))
+```
+
+
+# 6. Line plots Autoantigens
+
+### a. MS CSF - patient line plots
+```{r}
+fig4_ms_csf <- ggplot(lux_df_long_filt, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS CSF Luminex Data")   
+
+# Without SRRM3
+lux_df_long_filt_no_srrm3 <- lux_df_long_filt[! lux_df_long_filt$bead %in% "SRRM3",]
+fig4_ms_csf_no_srrm3 <- ggplot(lux_df_long_filt_no_srrm3, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS CSF Luminex Data")
+```
+
+
+### b. MS Serum - patient line plots
+```{r}
+fig4_ms_serum <- ggplot(lux_df_long_ms_serum, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS Serum Luminex Data")   
+
+# Without SRRM3
+lux_df_long_ms_serum_no_srrm3 <- lux_df_long_ms_serum[! lux_df_long_ms_serum$bead %in% "SRRM3",]
+fig4_ms_serum_no_srrm3 <- ggplot(lux_df_long_ms_serum_no_srrm3, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS Serum Luminex Data") 
+```
+
+
+### c. OND CSF - patient line plots
+```{r}
+fig4_ond_csf <- ggplot(lux_df_long_ond_csf, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = final_diagnosis)) + 
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_csf"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND CSF Luminex Data")  
+
+# Without SRRM3
+lux_df_long_ond_csf_no_srrm3 <- lux_df_long_ond_csf[! lux_df_long_ond_csf$bead %in% "SRRM3",]
+fig4_ond_csf_no_srrm3 <- ggplot(lux_df_long_ond_csf_no_srrm3, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = final_diagnosis)) + 
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_csf"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND CSF Luminex Data")  
+```
+
+
+### d. OND Serum - patient line plots
+```{r}
+fig4_ond_serum <- ggplot(lux_df_long_ond_serum, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(color = final_diagnosis)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_serum"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND Serum Luminex Data") 
+
+# Without SRRM3
+lux_df_long_ond_serum_no_srrm3 <- lux_df_long_ond_serum[! lux_df_long_ond_serum$bead %in% "SRRM3",]
+fig4_ond_serum_no_srrm3 <- ggplot(lux_df_long_ond_serum_no_srrm3, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(color = final_diagnosis)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_serum"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND Serum Luminex Data") 
+```
+
+
+# 7. Line plots Pathogens
+
+### a. MS CSF - patient line plots
+```{r}
+fig4_ms_csf_pathogens <- ggplot(lux_df_long_filt_pathogens, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS CSF Luminex Data")   
+```
+
+### b. MS Serum - patient line plots
+```{r}
+fig4_ms_serum_pathogens <- ggplot(lux_df_long_ms_serum_pathogens, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = sample_type)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=GROUP_COLORS) + 
+  labs(x = "",y = "log(MFI / MFI bsa)",title = "MS Serum Luminex Data")   
+```
+
+
+### c. OND CSF - patient line plots
+```{r}
+fig4_ond_csf_pathogens <- ggplot(lux_df_long_ond_csf_pathogens, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(colour = final_diagnosis)) + 
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_csf"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND CSF Luminex Data")   
+```
+
+
+### d. OND Serum - patient line plots
+```{r}
+fig4_ond_serum_pathogens <- ggplot(lux_df_long_ond_serum_pathogens, aes(x = bead, y = mfi, group = Patient)) +
+  geom_line(aes(color = final_diagnosis)) +
+  geom_point() + THEME_FIG4 + YLIM + 
+  scale_colour_manual(values=c("OND_serum"="darkblue")) + 
+  labs(x = "",
+       y = "log(MFI / MFI bsa)",
+       title = "OND Serum Luminex Data")   
+```
+
+# ---
+
+# DOT PLOTS
+
+# 8. Dot plot - autoantigens patients
+* pep_sum_mfi = RIM2+TRIO+KRT75+SRSF4+CLASRP+SRRM3
+```{r,fig.height=5,fig.width=9}
+MFI_THRESH_CSF = 3
+MFI_THRESH     = 3
+OMIT_FIG4 <- c("93b","47b")
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi")]
+dot_color_df$pep_sum_mfi <- round(dot_color_df$pep_sum_mfi,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi
+names(new_color_vec) <- dot_color_df$Patient
+enriched_pts_autoantigens         <- unique(names(new_color_vec[new_color_vec >= MFI_THRESH]))
+
+# Only keep patients meeting CSF threshold
+lux_df_csf   <- lux_df[lux_df$final_diagnosis %in% c("MS_csf","OND_csf","NID_csf"),]
+dot_color_df_csf         <- lux_df_csf[,c("Patient","pep_sum_mfi")]
+dot_color_df_csf$pep_sum_mfi <- round(dot_color_df_csf$pep_sum_mfi,digits = 1)
+enriched_pts_autoantigens_csf <- dot_color_df_csf[dot_color_df_csf$pep_sum_mfi >= MFI_THRESH_CSF,]
+enriched_pts_autoantigens_csf <- unique(enriched_pts_autoantigens_csf$Patient)
+
+enriched_pts_autoantigens <- enriched_pts_autoantigens[enriched_pts_autoantigens %in% enriched_pts_autoantigens_csf]
+
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% enriched_pts_autoantigens] <- "Remaining_Patients"
+
+rem_pts <- new_col[new_col %in% "Remaining_Patients"] %>% names() %>% unique()
+
+# Change colors
+uni_pts_autoantigens <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+colors_fig4 <- c(rainbow(length(uni_pts_autoantigens)),"black")
+names(colors_fig4) <- c(uni_pts_autoantigens,"Remaining_Patients")
+
+
+plot_df_fig4 <- lux_df
+plot_df_fig4$patient <- new_col
+plot_df_fig4 <- plot_df_fig4[! plot_df_fig4$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_sub <- plot_df_fig4[plot_df_fig4$Patient %in% patients_origins_cluster,]
+plot_df_fig4_sub$final_diagnosis <- paste("Clus",plot_df_fig4_sub$final_diagnosis,sep = "_")
+plot_df_fig4_v2 <- rbind(plot_df_fig4,plot_df_fig4_sub)
+
+# Merge NID with OND CSF
+plot_df_fig4_v2$final_diagnosis[plot_df_fig4_v2$final_diagnosis %in% "NID_csf"] <- "OND_csf"
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf","OND_serum","OND_csf")
+plot_df_fig4_v2 <- plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_v2$final_diagnosis <- as.character(plot_df_fig4_v2$final_diagnosis)
+plot_df_fig4_v2$final_diagnosis <- factor(plot_df_fig4_v2$final_diagnosis,levels = diag_to_keep)
+
+# Create new column for connecting lines
+plot_df_fig4_v2$patient_fmt <- plot_df_fig4_v2$patient
+fmt_clus_pt_names <- plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"]
+plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"] <- paste("Clus",fmt_clus_pt_names,sep = "_")
+plot_df_fig4_v2$patient_fmt[plot_df_fig4_v2$patient_fmt %in% "Clus_Remaining_Patients"] <- "Remaining_Patients"
+
+fig4_dot_plot <- ggplot(plot_df_fig4_v2, aes(y = pep_sum_mfi, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_v2[! plot_df_fig4_v2$patient %in% "Remaining_Patients",],aes(group = patient_fmt)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+# 8.5. Dot plot - autoantigens No SRRM3
+```{r,fig.height=5,fig.width=9}
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi_no_SRRM3")]
+dot_color_df$pep_sum_mfi_no_SRRM3 <- round(dot_color_df$pep_sum_mfi_no_SRRM3,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi_no_SRRM3
+names(new_color_vec) <- dot_color_df$Patient
+enriched_pts_autoantigens_no_SRRM3         <- unique(names(new_color_vec[new_color_vec >= MFI_THRESH]))
+
+# Only keep patients meeting CSF threshold
+lux_df_csf   <- lux_df[lux_df$final_diagnosis %in% c("MS_csf","OND_csf","NID_csf"),]
+dot_color_df_csf         <- lux_df_csf[,c("Patient","pep_sum_mfi_no_SRRM3")]
+dot_color_df_csf$pep_sum_mfi_no_SRRM3 <- round(dot_color_df_csf$pep_sum_mfi_no_SRRM3,digits = 1)
+enriched_pts_autoantigens_csf <- dot_color_df_csf[dot_color_df_csf$pep_sum_mfi_no_SRRM3 >= MFI_THRESH_CSF,]
+enriched_pts_autoantigens_csf <- unique(enriched_pts_autoantigens_csf$Patient)
+
+enriched_pts_autoantigens_no_SRRM3 <- enriched_pts_autoantigens_no_SRRM3[enriched_pts_autoantigens_no_SRRM3 %in% enriched_pts_autoantigens_csf]
+
+
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% enriched_pts_autoantigens_no_SRRM3] <- "Remaining_Patients"
+rem_pts <- new_col[new_col %in% "Remaining_Patients"] %>% names() %>% unique()
+
+# Change colors
+uni_pts_autoantigens <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+colors_fig4 <- c(rainbow(length(uni_pts_autoantigens)),"black")
+names(colors_fig4) <- c(uni_pts_autoantigens,"Remaining_Patients")
+
+plot_df_fig4 <- lux_df
+plot_df_fig4$patient <- new_col
+plot_df_fig4 <- plot_df_fig4[! plot_df_fig4$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_sub <- plot_df_fig4[plot_df_fig4$Patient %in% patients_origins_cluster,]
+plot_df_fig4_sub$final_diagnosis <- paste("Clus",plot_df_fig4_sub$final_diagnosis,sep = "_")
+plot_df_fig4_v2 <- rbind(plot_df_fig4,plot_df_fig4_sub)
+
+# Merge NID with OND CSF
+plot_df_fig4_v2$final_diagnosis[plot_df_fig4_v2$final_diagnosis %in% "NID_csf"] <- "OND_csf"
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf","OND_serum","OND_csf")
+plot_df_fig4_v2 <- plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_v2$final_diagnosis <- as.character(plot_df_fig4_v2$final_diagnosis)
+plot_df_fig4_v2$final_diagnosis <- factor(plot_df_fig4_v2$final_diagnosis,levels = diag_to_keep)
+
+# Create new column for connecting lines
+plot_df_fig4_v2$patient_fmt <- plot_df_fig4_v2$patient
+fmt_clus_pt_names <- plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"]
+plot_df_fig4_v2[plot_df_fig4_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"] <- paste("Clus",fmt_clus_pt_names,sep = "_")
+plot_df_fig4_v2$patient_fmt[plot_df_fig4_v2$patient_fmt %in% "Clus_Remaining_Patients"] <- "Remaining_Patients"
+
+fig4_dot_plot_no_SRRM3 <- ggplot(plot_df_fig4_v2, aes(y = pep_sum_mfi_no_SRRM3, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_v2[! plot_df_fig4_v2$patient %in% "Remaining_Patients",],aes(group = patient_fmt)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+
+# 9. Dot plot - pathogens patients
+```{r,fig.height=5,fig.width=9}
+MFI_THRESH = 4
+
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi_pathogens")]
+dot_color_df$pep_sum_mfi_pathogens <- round(dot_color_df$pep_sum_mfi_pathogens,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi_pathogens
+names(new_color_vec) <- dot_color_df$Patient
+enriched_pts         <- unique(names(new_color_vec[new_color_vec >= MFI_THRESH]))
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% enriched_pts] <- "Remaining_Patients"
+# Change colors
+#pt_colors <- rainbow(11)
+uni_pts <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+colors_fig4 <- c(rainbow(length(uni_pts)),"black")
+names(colors_fig4) <- c(uni_pts,"Remaining_Patients")
+
+plot_df_fig4_pathogens <- lux_df
+plot_df_fig4_pathogens$patient <- new_col
+plot_df_fig4_pathogens <- plot_df_fig4_pathogens[! plot_df_fig4_pathogens$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_pathogens_sub <- plot_df_fig4_pathogens[plot_df_fig4_pathogens$Patient %in% patients_origins_cluster,]
+plot_df_fig4_pathogens_sub$final_diagnosis <- paste("Clus",plot_df_fig4_pathogens_sub$final_diagnosis,sep = "_")
+plot_df_fig4_pathogens_v2 <- rbind(plot_df_fig4_pathogens,plot_df_fig4_pathogens_sub)
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf","OND_serum","OND_csf","NID_csf")
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_pathogens_v2$final_diagnosis <- as.character(plot_df_fig4_pathogens_v2$final_diagnosis)
+plot_df_fig4_pathogens_v2$final_diagnosis <- factor(plot_df_fig4_pathogens_v2$final_diagnosis,levels = diag_to_keep)
+
+
+fig4_dot_plot_pathogens <- ggplot(plot_df_fig4_pathogens_v2, aes(y = pep_sum_mfi_pathogens, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients",],aes(group = patient)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+# 9.5. Dot plot - pathogens final
+```{r,fig.height=5,fig.width=9}
+MFI_THRESH = 4
+
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi_pathogens")]
+dot_color_df$pep_sum_mfi_pathogens <- round(dot_color_df$pep_sum_mfi_pathogens,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi_pathogens
+names(new_color_vec) <- dot_color_df$Patient
+enriched_pts         <- unique(names(new_color_vec[new_color_vec >= MFI_THRESH]))
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% enriched_pts] <- "Remaining_Patients"
+# Change colors
+uni_pts <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+colors_fig4 <- c(rainbow(length(uni_pts)),"black")
+names(colors_fig4) <- c(uni_pts,"Remaining_Patients")
+
+plot_df_fig4_pathogens <- lux_df
+plot_df_fig4_pathogens$patient <- new_col
+plot_df_fig4_pathogens <- plot_df_fig4_pathogens[! plot_df_fig4_pathogens$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_pathogens_sub <- plot_df_fig4_pathogens[plot_df_fig4_pathogens$Patient %in% patients_origins_cluster,]
+plot_df_fig4_pathogens_sub$final_diagnosis <- paste("Clus",plot_df_fig4_pathogens_sub$final_diagnosis,sep = "_")
+plot_df_fig4_pathogens_v2 <- rbind(plot_df_fig4_pathogens,plot_df_fig4_pathogens_sub)
+
+# Remove cluster 1 from other MS categories
+plot_df_fig4_pathogens_v2$index <- as.character(1:nrow(plot_df_fig4_pathogens_v2))
+clus1_patients <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("Clus_MS_csf","Clus_MS_serum"),"Patient"] %>% unique()
+plot_df_fig4_pathogens_v2_ms <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("MS_serum","MS_csf"),]
+plot_df_fig4_pathogens_v2_ms_clus <- plot_df_fig4_pathogens_v2_ms[plot_df_fig4_pathogens_v2_ms$Patient %in% clus1_patients,]
+
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$index %in% plot_df_fig4_pathogens_v2_ms_clus$index,]
+
+# Omit OND and NID
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$final_diagnosis %in% c("OND_serum","OND_csf","NID_csf"),]
+
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf")
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_pathogens_v2$final_diagnosis <- as.character(plot_df_fig4_pathogens_v2$final_diagnosis)
+plot_df_fig4_pathogens_v2$final_diagnosis <- factor(plot_df_fig4_pathogens_v2$final_diagnosis,levels = diag_to_keep)
+
+# Change levels
+pts_to_mv_to_top <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients","Patient"] %>% unique()
+all_pts <- unique(plot_df_fig4_pathogens_v2$Patient)
+all_pts_sub <- all_pts[! all_pts %in% pts_to_mv_to_top]
+
+plot_df_fig4_pathogens_v2$patient <- factor(plot_df_fig4_pathogens_v2$patient,levels = unique(plot_df_fig4_pathogens_v2$patient))
+plot_df_fig4_pathogens_v2$Patient <- factor(plot_df_fig4_pathogens_v2$Patient,levels = c(all_pts_sub,pts_to_mv_to_top))
+
+fig4_dot_plot_pathogens_fin <- ggplot(plot_df_fig4_pathogens_v2, aes(y = pep_sum_mfi_pathogens, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients",],aes(group = patient)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+# 9.9 Dot plot - pathogens with cluster patients colored
+```{r,fig.height=5,fig.width=9}
+MFI_THRESH = 4
+
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi_pathogens")]
+dot_color_df$pep_sum_mfi_pathogens <- round(dot_color_df$pep_sum_mfi_pathogens,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi_pathogens
+names(new_color_vec) <- dot_color_df$Patient
+
+# Get cluster 1 patients from previous plots
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% clus_patients] <- "Remaining_Patients"
+# Change colors
+uni_pts <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+pt_colors <- rainbow(9)
+pt_colors <- pt_colors[2:9]
+colors_fig4 <- c(pt_colors,"black")
+names(colors_fig4) <- c(uni_pts,"Remaining_Patients")
+
+plot_df_fig4_pathogens <- lux_df
+plot_df_fig4_pathogens$patient <- new_col
+plot_df_fig4_pathogens <- plot_df_fig4_pathogens[! plot_df_fig4_pathogens$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_pathogens_sub <- plot_df_fig4_pathogens[plot_df_fig4_pathogens$Patient %in% patients_origins_cluster,]
+plot_df_fig4_pathogens_sub$final_diagnosis <- paste("Clus",plot_df_fig4_pathogens_sub$final_diagnosis,sep = "_")
+plot_df_fig4_pathogens_v2 <- rbind(plot_df_fig4_pathogens,plot_df_fig4_pathogens_sub)
+
+# Remove cluster 1 from other MS categories
+plot_df_fig4_pathogens_v2$index <- as.character(1:nrow(plot_df_fig4_pathogens_v2))
+clus1_patients <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("Clus_MS_csf","Clus_MS_serum"),"Patient"] %>% unique()
+plot_df_fig4_pathogens_v2_ms <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("MS_serum","MS_csf"),]
+plot_df_fig4_pathogens_v2_ms_clus <- plot_df_fig4_pathogens_v2_ms[plot_df_fig4_pathogens_v2_ms$Patient %in% clus1_patients,]
+
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$index %in% plot_df_fig4_pathogens_v2_ms_clus$index,]
+
+# Omit OND and NID
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$final_diagnosis %in% c("OND_serum","OND_csf","NID_csf"),]
+
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf")
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_pathogens_v2$final_diagnosis <- as.character(plot_df_fig4_pathogens_v2$final_diagnosis)
+plot_df_fig4_pathogens_v2$final_diagnosis <- factor(plot_df_fig4_pathogens_v2$final_diagnosis,levels = diag_to_keep)
+
+# Change levels
+pts_to_mv_to_top <- plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients","Patient"] %>% unique()
+all_pts <- unique(plot_df_fig4_pathogens_v2$Patient)
+all_pts_sub <- all_pts[! all_pts %in% pts_to_mv_to_top]
+
+plot_df_fig4_pathogens_v2$patient <- factor(plot_df_fig4_pathogens_v2$patient,levels = unique(plot_df_fig4_pathogens_v2$patient))
+plot_df_fig4_pathogens_v2$Patient <- factor(plot_df_fig4_pathogens_v2$Patient,levels = c(all_pts_sub,pts_to_mv_to_top))
+
+fig4_dot_plot_pathogens_fin_clus1 <- ggplot(plot_df_fig4_pathogens_v2, aes(y = pep_sum_mfi_pathogens, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients",],aes(group = patient)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+
+# 10. Dot plot - pathogens use patients enriched in autoantigen panel
+```{r,fig.height=5,fig.width=9}
+MFI_THRESH = 4
+
+# Create color key for dot plot
+dot_color_df         <- lux_df[,c("Patient","pep_sum_mfi_pathogens")]
+dot_color_df$pep_sum_mfi_pathogens <- round(dot_color_df$pep_sum_mfi_pathogens,digits = 1)
+new_color_vec        <- dot_color_df$pep_sum_mfi_pathogens
+names(new_color_vec) <- dot_color_df$Patient
+new_col        <- dot_color_df$Patient
+names(new_col) <- dot_color_df$Patient
+new_col[! names(new_col) %in% enriched_pts_autoantigens] <- "Remaining_Patients"
+# Change colors
+uni_pts <- unique(new_col)[! unique(new_col) %in% "Remaining_Patients"]
+colors_fig4 <- c(rainbow(length(uni_pts)),"black")
+names(colors_fig4) <- c(uni_pts,"Remaining_Patients")
+
+plot_df_fig4_pathogens <- lux_df
+plot_df_fig4_pathogens$patient <- new_col
+plot_df_fig4_pathogens <- plot_df_fig4_pathogens[! plot_df_fig4_pathogens$Patient %in% OMIT_FIG4,]
+
+# Add in Origins Cluster 1
+plot_df_fig4_pathogens_sub <- plot_df_fig4_pathogens[plot_df_fig4_pathogens$Patient %in% patients_origins_cluster,]
+plot_df_fig4_pathogens_sub$final_diagnosis <- paste("Clus",plot_df_fig4_pathogens_sub$final_diagnosis,sep = "_")
+plot_df_fig4_pathogens_v2 <- rbind(plot_df_fig4_pathogens,plot_df_fig4_pathogens_sub)
+
+diag_to_keep <- c("Clus_MS_serum","Clus_MS_csf","MS_serum","MS_csf","OND_serum","OND_csf","NID_csf")
+plot_df_fig4_pathogens_v2 <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% diag_to_keep,]
+plot_df_fig4_pathogens_v2$final_diagnosis <- as.character(plot_df_fig4_pathogens_v2$final_diagnosis)
+plot_df_fig4_pathogens_v2$final_diagnosis <- factor(plot_df_fig4_pathogens_v2$final_diagnosis,levels = diag_to_keep)
+
+# Create new column for connecting lines
+plot_df_fig4_pathogens_v2$patient_fmt <- plot_df_fig4_pathogens_v2$patient
+fmt_clus_pt_names <- plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"]
+plot_df_fig4_pathogens_v2[plot_df_fig4_pathogens_v2$final_diagnosis %in% c("Clus_MS_serum","Clus_MS_csf"),"patient_fmt"] <- paste("Clus",fmt_clus_pt_names,sep = "_")
+plot_df_fig4_pathogens_v2$patient_fmt[plot_df_fig4_pathogens_v2$patient_fmt %in% "Clus_Remaining_Patients"] <- "Remaining_Patients"
+
+fig4_dot_plot_pathogens_select_pts <- ggplot(plot_df_fig4_pathogens_v2, aes(y = pep_sum_mfi_pathogens, x = final_diagnosis)) +
+  geom_jitter(aes(color=patient),position = position_jitter(width = 0.05), size = 3) + 
+  scale_color_manual(values = colors_fig4) + theme_bw() + 
+  geom_line(data = plot_df_fig4_pathogens_v2[! plot_df_fig4_pathogens_v2$patient %in% "Remaining_Patients",],aes(group = patient_fmt)) + 
+  theme(axis.title.x=element_blank(),
+        axis.text=element_text(size=12),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_text(size=12),
+        panel.background=element_blank(),
+        panel.border=element_rect(fill = NA,colour ="black"),
+        panel.grid = element_blank(),
+        plot.background = element_blank()) +
+  labs(x = "",
+       y = "log(Sum(MFI) / MFI bsa)",
+       title = "")
+```
+
+
+# ---
+
+
+# PDFs - panel
+```{r,fig.height=5,fig.width=6}
+# Line plots
+fig4a_panel_autoantigens <- plot_grid(fig4_ms_csf,fig4_ms_serum,fig4_ond_csf,fig4_ond_serum,fig4a_csf_mfi_rpk,fig4a_serum_mfi_rpk,ncol=2)
+fig4a_panel_pathogens    <- plot_grid(fig4_ms_csf_pathogens,fig4_ms_serum_pathogens,fig4_ond_csf_pathogens,fig4_ond_serum_pathogens,ncol=2)
+
+# Line plot autoantigens with no SRRM3
+fig4a_panel_autoantigens_no_srrm3 <- plot_grid(fig4_ms_csf_no_srrm3,fig4_ms_serum_no_srrm3,fig4_ond_csf_no_srrm3,fig4_ond_serum_no_srrm3,fig4a_csf_mfi_rpk_no_srrm3,fig4a_serum_mfi_rpk_no_srrm3,ncol=2)
+
+# sumMFI MS panel
+fig4a_sum_mfi_panel <- plot_grid(fig4a_csf_mfi_auto_pathogens,fig4a_serum_mfi_auto_pathogens,ncol = 2)
+
+# Dot Plots
+fig4b_panel_autoantigens             <- fig4_dot_plot
+fig4b_panel_autoantigens_no_srrm3    <- fig4_dot_plot_no_SRRM3
+fig4b_panel_pathogens                <- fig4_dot_plot_pathogens
+fig4b_panel_pathogens_final          <- fig4_dot_plot_pathogens_fin
+
+# Extra
+fig4b_panel_pathogens_final_clus1    <- fig4_dot_plot_pathogens_fin_clus1
+fig4b_panel_pathogens2               <- fig4_dot_plot_pathogens_select_pts
+
+
+# PDFs
+
+# 4a Revised
+plot_fig4a_fh <- file.path(PLOT_DIR,"fig4a_luminex_autoantigens.pdf")
+pdf(file = plot_fig4a_fh,height = 12,width = 10)
+fig4a_panel_autoantigens
+dev.off()
+
+# No SRRM3
+plot_fig4a_no_SRRM3_fh <- file.path(PLOT_DIR,"fig4a_luminex_autoantigens_no_SRRM3.pdf")
+pdf(file = plot_fig4a_no_SRRM3_fh,height = 12,width = 10)
+fig4a_panel_autoantigens_no_srrm3
+dev.off()
+
+
+plot_fig4a_fh2 <- file.path(PLOT_DIR,"fig4a_luminex_pathogens.pdf")
+pdf(file = plot_fig4a_fh2,height = 8,width = 13)
+fig4a_panel_pathogens
+dev.off()
+
+
+# 4a - sum MFI
+plot_fig4a_sumMFI_fh <- file.path(PLOT_DIR,"fig4a_luminex_sumMFI_autoantigen_vs_pathogen.pdf")
+pdf(file = plot_fig4a_sumMFI_fh,height = 5,width = 13)
+fig4a_sum_mfi_panel
+dev.off()
+
+
+# 4b
+plot_fig4b_fh <- file.path(PLOT_DIR,"fig4b_luminex_autoantigens.pdf")
+pdf(file = plot_fig4b_fh,height = 5,width = 11)
+fig4b_panel_autoantigens
+dev.off()
+# No SRRM3
+plot_fig4b_no_srrm3_fh <- file.path(PLOT_DIR,"fig4b_luminex_autoantigens_no_SRRM3.pdf")
+pdf(file = plot_fig4b_no_srrm3_fh,height = 5,width = 11)
+fig4b_panel_autoantigens_no_srrm3
+dev.off()
+
+
+plot_fig4b_fh2 <- file.path(PLOT_DIR,"fig4b_luminex_pathogens.pdf")
+pdf(file = plot_fig4b_fh2,height = 5,width = 11)
+fig4b_panel_pathogens_final
+dev.off()
+
+# Cluster 1 highlighted
+plot_fig4b_fh2_clus1 <- file.path(PLOT_DIR,"fig4b_luminex_pathogens_cluster1_colored.pdf")
+pdf(file = plot_fig4b_fh2_clus1,height = 5,width = 11)
+fig4b_panel_pathogens_final_clus1
+dev.off()
+```
+

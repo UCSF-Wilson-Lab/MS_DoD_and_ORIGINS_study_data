@@ -1,0 +1,796 @@
+---
+title: "Setup DoD and ORIGINS plot Objects"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(viridis)
+library(png)
+library(ggplot2) # extra
+library(cowplot)
+library(ggrepel)
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+PLOT_DIR <- "plots"
+```
+
+
+# -------------------------------------
+
+
+# DOD
+
+# FIGURE 1
+```{r}
+load("pairseq/kmer_casepost.RData")
+```
+
+
+```{r}
+dod_rpk  <- read.csv("rpk_tables/dod_rpk.csv",stringsAsFactors = F) 
+epic_rpk <- read.csv("rpk_tables/epic_rpk.csv",stringsAsFactors = F) 
+gfap_rpk <- read.csv("rpk_tables/gfap_rpk.csv",stringsAsFactors = F) 
+pos_rpk  <- read.csv("rpk_tables/pos_rpk.csv",stringsAsFactors = F) 
+pd_rpk   <- read.csv("rpk_tables/pd_rpk.csv",stringsAsFactors = F) 
+```
+
+
+
+```{r}
+## Adding in the re-sequenced samples 
+re_dod_rpk <- read.csv("rerun/dod_rpk.csv",stringsAsFactors = F) 
+colnames(re_dod_rpk)<-gsub("_cgorigins","",colnames(re_dod_rpk))
+missing <- setdiff(colnames(re_dod_rpk), colnames(dod_rpk))
+dupes   <- intersect(colnames(re_dod_rpk), colnames(dod_rpk))
+add_in  <- re_dod_rpk[,c("peptide", missing)]
+
+## add in missing samples 
+dod_rpk <- full_join(dod_rpk, add_in, by = "peptide")
+```
+
+
+
+```{r}
+# Peptide gene name table
+peptide_gene_map <- read.csv("metadata/peptide_gene_mapping.csv",stringsAsFactors = F) %>% clean_names()
+colnames(peptide_gene_map)[1] <- "peptide"
+
+#merged peptide map
+merged_peptide_map <- read.csv("ref_oligos/merged_peptide_map.csv", stringsAsFactors = F)
+merged_peptide_map <- merged_peptide_map %>% mutate(index = row_number())
+
+# Load meta data
+metadata      <- read.csv("metadata/list_with_plate_locations.csv",stringsAsFactors = F) %>% clean_names()
+prepost       <- read.csv("metadata/Case_Control_Serum.csv", stringsAsFactors = F) %>% clean_names()
+metadata$type <- str_replace_all(metadata$type,"\\ ","_")
+still_missing <- setdiff(metadata$serum_id, colnames(dod_rpk))
+```
+
+
+```{r}
+# 1b separate pre/post metadata 
+collection <- c()
+ser_yr <- c()
+
+for (i in 1:nrow(metadata)){
+  serID <- metadata$serum_id[i]
+  if (serID %in% prepost$pre_serumid) {
+    collection[i] <- "pre"
+    ser_yr[i] <- prepost$pre_ser_yr[which(prepost$pre_serumid == serID)]
+  } else if (serID %in% prepost$post_serumid) {
+    collection[i] <- "post"
+    ser_yr[i] <- prepost$post_ser_yr[which(prepost$post_serumid == serID)]    
+  } else {
+    collection[i] <- "NA"
+    ser_yr[i] <- "NA"
+  }
+}
+
+metadata <- cbind(metadata, collection, ser_yr)
+metadata$ser_age <- metadata$ser_yr-metadata$year_birth
+```
+
+
+```{r}
+# 2. Format Columns/subset data
+col_names <- names(dod_rpk)
+col_names <- str_replace_all(col_names,"\\.","_") 
+
+cols_to_keep <- c()   
+for (i in 2:length(col_names)) {
+  sample    <- col_names[i]
+  sample_id <- tstrsplit(sample,"_")[[1]] 
+  metadata_sub <- metadata[metadata$serum_id %in% sample_id,]
+  if(nrow(metadata_sub) == 0){next} 
+  
+  type <- metadata_sub$type
+  collection <- as.character(metadata_sub$collection)
+  studyid <- metadata_sub$studyid 
+  sample_fmt <- paste(c(studyid, type, collection), collapse = "_")
+  col_names[i] <- sample_fmt     
+  
+  cols_to_keep <- c(cols_to_keep,sample_fmt)
+}
+
+names(dod_rpk) <- col_names
+```
+
+
+
+
+```{r}
+# PairSeq
+beadnames <- names(pd_rpk)
+bead_cols <- beadnames[grep("bead", beadnames)]
+bead_rpk <- pd_rpk[, c("peptide", bead_cols)]
+
+# 1. Merge both data sets (by peptide column)
+df <- full_join(dod_rpk, epic_rpk, by = "peptide")
+df <- full_join(df, pos_rpk, by = "peptide")
+df <- full_join(df, gfap_rpk, by = "peptide")
+df <- full_join(df, bead_rpk, by = "peptide")
+df <- left_join(df, merged_peptide_map, by = "peptide")
+
+#remove input dataframes
+pos_cols <- names(pos_rpk)[2:6]
+rm(dod_rpk, epic_rpk, gfap_rpk, pos_rpk, pd_rpk, bead_rpk)
+```
+
+
+
+```{r}
+# 2. Create unique identifier column
+df$peptide_id <- paste(df$gene, df$index,sep = "_")
+
+#Replace NA values with 0
+df[is.na(df)] <- 0
+```
+
+
+```{r}
+# 3. Calculate Mean RPK
+
+#get names 
+all_names         <- names(df)
+gfap_cols         <- all_names[grep("gfap",all_names)]
+healthy_cols      <- all_names[grep("healthy",all_names)]
+healthy_pre_cols  <- healthy_cols[grep("pre", healthy_cols)]
+healthy_post_cols <- healthy_cols[grep("post", healthy_cols)]  
+case_pre_cols     <- all_names[grep("Case_pre",all_names)]
+case_post_cols    <- all_names[grep("Case_post",all_names)]
+tbi_cols          <- all_names[grep("TBI",all_names)]
+mig_cols          <- all_names[grep("Migraine",all_names)]
+epic_csf_cols     <- all_names[grep("_csf",all_names)]
+epic_serum_cols   <- all_names[grep("_serum",all_names)]
+bead_cols         <- all_names[grep("bead",all_names)]
+
+# Mean RPK and replace 0's with median value
+df$mean_ref     <- apply(df[,c(healthy_cols)], 1, mean)     # Control group
+hc_avg <- median(df$mean_ref)
+df$mean_ref[df$mean_ref == 0] <- hc_avg
+
+df$mean_disease <- apply(df[,c(case_post_cols)], 1, mean)   # Cases
+case_avg <- median(df$mean_disease)
+df$mean_disease[df$mean_disease == 0] <- case_avg
+
+df$mean_beads   <- apply(df[,c(bead_cols)], 1, mean)        # Beads
+bead_avg <- mean(df$mean_beads)
+df$mean_beads[df$mean_beads == 0] <- bead_avg
+
+df$sd_ref <-  apply(df[,c(healthy_cols)], 1, sd) 
+```
+
+
+```{r}
+# 4. Calculate Fold Change
+df_fc_ref    <- makeFCdf(df,
+                         target_columns = healthy_cols,
+                         mean_column    = "mean_ref",  onlyFC = T)
+df_fc_disease <- makeFCdf(df,
+                          target_columns = c(case_post_cols, case_pre_cols, tbi_cols, mig_cols, epic_csf_cols, epic_serum_cols, gfap_cols, pos_cols, bead_cols),
+                          mean_column    = "mean_ref", onlyFC = T)
+
+df_fc <- cbind(df_fc_ref,df_fc_disease)
+rm(df_fc_disease, df_fc_ref)
+```
+
+
+```{r}
+# 5. Calculate z score
+fc_names <- names(df_fc)
+
+gfap_fc_cols <- fc_names[grep("gfap",fc_names)]
+gfap_z_cols  <- str_replace_all(gfap_fc_cols, "_FC","_Z")
+
+healthy_fc_cols <- fc_names[grep("healthy",fc_names)]
+healthy_z_cols  <- str_replace_all(healthy_fc_cols, "_FC","_Z")
+
+healthy_pre_fc_cols <- healthy_fc_cols[grep("pre",healthy_fc_cols)]
+healthy_pre_z_cols  <- str_replace_all(healthy_pre_fc_cols, "_FC","_Z")
+
+healthy_post_fc_cols <- healthy_fc_cols[grep("post",healthy_fc_cols)]
+healthy_post_z_cols  <- str_replace_all(healthy_post_fc_cols, "_FC","_Z")
+
+case_pre_fc_cols <- fc_names[grep("Case_pre",fc_names)]
+case_pre_z_cols  <- str_replace_all(case_pre_fc_cols, "_FC","_Z")
+
+case_post_fc_cols <- fc_names[grep("Case_post",fc_names)]
+case_post_z_cols  <- str_replace_all(case_post_fc_cols, "_FC","_Z")
+
+tbi_fc_cols <- fc_names[grep("TBI",fc_names)]
+tbi_z_cols  <- str_replace_all(tbi_fc_cols, "_FC","_Z")
+
+mig_fc_cols <- fc_names[grep("Migraine",fc_names)]
+mig_z_cols  <- str_replace_all(mig_fc_cols, "_FC","_Z")
+
+epic_fc_csf_cols <- fc_names[grep("_csf",fc_names)]
+epic_z_csf_cols  <- str_replace_all(epic_fc_csf_cols, "_FC","_Z")
+
+epic_fc_serum_cols <- fc_names[grep("_serum",fc_names)]
+epic_z_serum_cols  <- str_replace_all(epic_fc_serum_cols, "_FC","_Z")
+
+pos_fc_cols <- paste0(pos_cols, "_FC")
+pos_z_cols  <- str_replace_all(pos_fc_cols, "_FC","_Z")
+
+bead_fc_cols <- paste0(bead_cols, "_FC")
+bead_z_cols  <- str_replace_all(pos_fc_cols, "_FC","_Z")
+
+df_z <- calcZscores(df_fc, target.samples = c(case_post_fc_cols, case_pre_fc_cols, tbi_fc_cols, mig_fc_cols, epic_fc_csf_cols, epic_fc_serum_cols, gfap_fc_cols, pos_fc_cols, healthy_fc_cols, bead_fc_cols), reference.samples = healthy_fc_cols)
+names(df_z) <- str_replace_all(names(df_z), "_FC","_Z")
+df_fc_z <- cbind(df, df_fc, df_z)
+rm(df, df_fc, df_z)
+```
+
+
+
+```{r}
+candidate_df_exp_fin_oldmeth <- candidate_df_fin 
+
+candidate_df_exp_fin_oldmeth[is.na(candidate_df_exp_fin_oldmeth)] <- 0
+candidate_df_exp_fin <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap > 0,]
+candidate_df_exp_fin_singlet     <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap == 0,]
+candidate_df_exp_fin_singlet_sub <- filterPeptides(candidate_df_exp_fin_singlet,list_of_samples = case_post_cols ,RPK_THRESH = 20,FC_THRESH = 100)
+
+candidate_df_exp_fin <- rbind(candidate_df_exp_fin,candidate_df_exp_fin_singlet_sub)
+```
+
+
+
+
+## Make Filtered Dataframe
+```{r}
+tinydf <- candidate_df_exp_fin[c("peptide_id", case_pre_fc_cols, case_post_fc_cols, healthy_cols)]
+tinydf <- tinydf %>% mutate(count_rich = rowSums(tinydf[, case_post_fc_cols[1:243]] > 10))
+tinydf <- tinydf %>% filter(count_rich > 15)
+
+top_peptides <- as.vector(tinydf$peptide_id)
+```
+
+
+```{r}
+top_candidates <- candidate_df_exp_fin %>% filter(peptide_id %in% top_peptides)
+top_candidates <- arrange(top_candidates, gene)
+
+# peptide metadata for row annotation
+top_pep_meta <- top_candidates[, c("peptide_id", "gene")]
+peptide_id   <- top_pep_meta[, 1]
+top_pep_meta <- top_pep_meta[ -1]
+rownames(top_pep_meta) <- peptide_id
+```
+
+
+## Filter for Z-score columns
+```{r}
+tiny_z <- top_candidates[c("peptide_id", case_pre_z_cols, case_post_z_cols, healthy_pre_z_cols, healthy_post_z_cols )]
+
+peptide <- tiny_z[, 1]
+tiny_z  <- tiny_z[, -1]
+
+rownames(tiny_z) <- peptide
+
+z_metadata        <- metadata
+z_metadata$sample <- with(metadata, paste0(studyid, "_", type, "_", collection, "_", "Z"))
+
+z_metadata <- z_metadata[, c("sample", "type", "collection")]
+rownames   <- z_metadata[, 1]
+z_metadata <- z_metadata[, -1]
+rownames(z_metadata) <- rownames
+```
+
+
+## Filter for FC columns
+```{r}
+tiny_fc <- top_candidates[c("peptide_id", case_pre_fc_cols, case_post_fc_cols, healthy_pre_fc_cols, healthy_post_fc_cols )]
+
+peptide <- tiny_fc[, 1]
+tiny_fc <- tiny_fc[, -1]
+rownames(tiny_fc) <- peptide
+
+fc_metadata        <- metadata
+fc_metadata$sample <- with(metadata, paste0(studyid, "_", type, "_", collection, "_", "FC"))
+
+fc_metadata <- fc_metadata[, c("sample", "type", "collection")]
+rownames    <- fc_metadata[, 1]
+fc_metadata <- fc_metadata[, -1]
+rownames(fc_metadata) <- rownames
+```
+
+
+## Create Log10 FC dataframe
+```{r}
+tiny_logfc <- top_candidates[c("peptide_id", case_pre_fc_cols, case_post_fc_cols, healthy_pre_fc_cols, healthy_post_fc_cols )]
+
+peptide    <- tiny_logfc[, 1]
+tiny_logfc <- tiny_logfc[, -1]
+
+rownames(tiny_logfc) <- peptide
+tiny_logfc[tiny_logfc == 0] <- 1
+tiny_logfc <- log10(tiny_logfc)
+
+fc_metadata        <- metadata
+fc_metadata$sample <- with(metadata, paste0(studyid, "_", type, "_", collection, "_", "FC"))
+
+fc_metadata <- fc_metadata[, c("sample", "type", "collection")]
+rownames    <- fc_metadata[, 1]
+fc_metadata <- fc_metadata[, -1]
+rownames(fc_metadata) <- rownames
+```
+
+
+# FIGURE 2
+
+
+## Keep peptides with larmatope
+```{r}
+df_fc_z$sequence[1]
+
+consensus_df       <- df_fc_z %>% filter(grepl("P[AS].[SGA]R[SN][RLHK]", sequence))
+consensus_genelist <- consensus_df %>% select(peptide, gene, sequence, sequence, peptide_id)
+```
+
+
+## SAVE ENV
+```{r}
+env_fh <- "objects/TEMP_ENV_FIG1and2.RData"
+save(list = ls(),file = env_fh)
+```
+
+
+# -------------------------------------
+
+# ORIGINS
+
+# FIGURE 3
+
+## 1. Load obj and tables
+```{r}
+#CSF
+load("pairseq/origins_csf_kmer.RData")
+# Serum
+load("pairseq/origins_serum_kmer.RData")
+```
+
+
+
+```{r}
+# 1a. Load MEEBO RPK data frame
+bead_rpk    <- read.csv("data_origins/beads_rpk.csv",stringsAsFactors = F) 
+nid_rpk     <- read.csv("data_origins/nid_rpk.csv",stringsAsFactors = F) 
+nybb_rpk    <- read.csv("data_origins/nybb_rpk.csv",stringsAsFactors = F) 
+origins_rpk <- read.csv("data_origins/origins_rpk.csv",stringsAsFactors = F) 
+gfap_rpk    <- read.csv("data_origins/gfap_rpk.csv",stringsAsFactors = F) 
+```
+
+
+## 2. Load and metadata
+```{r}
+# Load in bead metadata 
+metadata <- read.csv("data_origins/ORIGINSEPICPatientSamples.csv",stringsAsFactors = F) %>% clean_names()
+colnames(metadata)[1] <- "sample"
+
+ond_ids  <- read.csv("data_origins/OND_ID_list.csv",stringsAsFactors = F)
+ond      <- ond_ids$ID
+ond      <- unique(ond)
+
+# Get Sample Vectors
+count_df <- metadata %>% filter(final_diagnosis == "MS_csf") 
+ms_csf_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "MS_serum") 
+ms_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "OND_csf") 
+ond_csf_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "OND_serum") 
+ond_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "Healthy_csf") 
+healthy_csf_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "Healthy_serum") 
+healthy_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "CIS_serum") 
+CIS_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "CIS_csf") 
+CIS_csf_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis ==  "RIS_serum") 
+RIS_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "RIS_csf") 
+RIS_csf_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis ==  "Unknown_serum") 
+unknown_serum_cols <- count_df[, "sample"]
+
+count_df <- metadata %>% filter(final_diagnosis == "Unknown_csf") 
+unknown_csf_cols <- count_df[, "sample"]
+
+rm(count_df)
+```
+
+
+## 3.Get all relevant sample lists
+```{r}
+nid_cols  <- colnames(nid_rpk)[-1]
+bead_cols <- colnames(bead_rpk)[-1]
+nybb_cols <- colnames(nybb_rpk)[-1]
+origins_cols <- colnames(origins_rpk)[-1]
+
+#MS
+origins_ms_csf_cols   <- paste0("X", ms_csf_cols, "_csf_cgorigins")
+origins_ms_serum_cols <- paste0("X", ms_serum_cols, "_serum_cgorigins")
+origins_ms_csf_cols   <- intersect(origins_cols, origins_ms_csf_cols)
+origins_ms_serum_cols <- intersect(origins_cols, origins_ms_serum_cols)
+origins_ms_cols       <- c(origins_ms_csf_cols, origins_ms_serum_cols)
+
+#healthy controls
+origins_healthy_csf_cols   <- c(paste0("X", healthy_csf_cols, "_csf_cgorigins"))
+origins_healthy_serum_cols <- paste0("X", healthy_serum_cols, "_serum_cgorigins")
+origins_healthy_csf_cols   <- intersect(origins_cols, origins_healthy_csf_cols)
+origins_healthy_serum_cols <- intersect(origins_cols, origins_healthy_serum_cols)
+
+
+#OND
+origins_ond_csf_cols   <- c(paste0("X", ond_csf_cols, "_csf_cgorigins"))
+origins_ond_serum_cols <- paste0("X", ond_serum_cols, "_serum_cgorigins")
+origins_ond_csf_cols   <- intersect(origins_cols, origins_ond_csf_cols)
+origins_ond_serum_cols <- intersect(origins_cols, origins_ond_serum_cols)
+
+#CIS
+origins_CIS_csf_cols   <- paste0("X", CIS_csf_cols, "_csf_cgorigins")
+origins_CIS_serum_cols <- paste0("X", CIS_serum_cols, "_serum_cgorigins")
+origins_CIS_csf_cols   <- intersect(origins_cols, origins_CIS_csf_cols)
+origins_CIS_serum_cols <- intersect(origins_cols, origins_CIS_serum_cols)
+
+origins_RIS_csf_cols   <- paste0("X", RIS_csf_cols, "_csf_cgorigins")
+origins_RIS_serum_cols <- paste0("X", RIS_serum_cols, "_serum_cgorigins")
+origins_RIS_csf_cols   <- intersect(origins_cols, origins_RIS_csf_cols)
+origins_RIS_serum_cols <- intersect(origins_cols, origins_RIS_serum_cols)
+
+origins_unknown_csf_cols   <- paste0("X", unknown_csf_cols, "_csf_cgorigins")
+origins_unknown_serum_cols <- paste0("X", unknown_serum_cols, "_serum_cgorigins")
+origins_unknown_csf_cols   <- intersect(origins_cols, origins_unknown_csf_cols)
+origins_unknown_serum_cols <- intersect(origins_cols, origins_unknown_serum_cols)
+
+all_origins <- c(origins_healthy_csf_cols, origins_healthy_serum_cols, origins_ond_csf_cols, origins_ond_serum_cols, origins_ms_csf_cols, origins_ms_serum_cols,
+                 origins_CIS_csf_cols , origins_CIS_serum_cols, origins_RIS_csf_cols, origins_RIS_serum_cols,
+                 origins_unknown_csf_cols,  origins_unknown_serum_cols)
+mycraw <- setdiff(origins_cols, all_origins)
+
+nid_csf_cols    <- nid_cols[grep("_csf_",nid_cols)]
+ctrl_csf_cols   <- c(origins_healthy_csf_cols, origins_ond_csf_cols, nid_csf_cols )
+ctrl_serum_cols <- c(nybb_cols, origins_healthy_serum_cols, origins_ond_serum_cols)
+gfap_cols       <- c("GFAP_1_cgorigins", "GFAP_2_cgorigins", "GFAP_3_cgorigins", "GFAP_4_cgorigins")
+```
+
+
+## 4. Load and merge peptidome gene maps for plots
+```{r}
+# Peptide gene name table
+peptide_gene_map <- read.csv("metadata/peptide_gene_mapping.csv",stringsAsFactors = F) %>% clean_names()
+colnames(peptide_gene_map)[1] <- "peptide"
+
+#merged peptide map
+merged_peptide_map <- read.csv("ref_oligos/merged_peptide_map.csv", stringsAsFactors = F)
+merged_peptide_map <- merged_peptide_map %>% mutate(index = row_number())
+```
+
+
+## 5. format origins df
+```{r}
+nid_rpk <- nid_rpk[, c("peptide", nid_csf_cols)]
+
+# 1. Merge both data sets (by peptide column)
+df <- full_join(origins_rpk, nid_rpk, by = "peptide")
+df <- full_join(df, nybb_rpk, by = "peptide")
+df <- full_join(df, bead_rpk, by = "peptide")
+df <- full_join(df, gfap_rpk, by = "peptide")
+df <- left_join(df, merged_peptide_map, by = "peptide")
+
+#remove input dataframes
+rm(origins_rpk, nid_rpk, bead_rpk, nybb_rpk, gfap_rpk)
+
+
+# 2. Create unique identifier column
+df$peptide_id <- paste(df$gene, df$index,sep = "_")
+
+# Replace NA values with 0
+df[is.na(df)] <- 0
+any(is.na(df))
+```
+
+
+## 6. Setting up input dfs (CSF and Serum)
+
+### a. mean calc
+```{r}
+# 3. Calculate Mean RPK
+
+#Mean RPK and replace 0's with median value
+
+##CSF
+df$mean_csf_ref     <- apply(df[,c(ctrl_csf_cols)], 1, mean)     # Control group
+hc_avg <- median(df$mean_csf_ref)
+df$mean_csf_ref[df$mean_csf_ref == 0] <- hc_avg
+
+df$mean_csf_disease <- apply(df[,c(origins_ms_csf_cols)], 1, mean)   # Cases
+case_avg <- median(df$mean_csf_disease)
+df$mean_csf_disease[df$mean_csf_disease == 0] <- case_avg
+
+##Serum
+df$mean_serum_ref     <- apply(df[,c(ctrl_serum_cols)], 1, mean)     # Control group
+hc_avg <- median(df$mean_serum_ref)
+df$mean_serum_ref[df$mean_serum_ref == 0] <- hc_avg
+
+df$mean_serum_disease <- apply(df[,c(origins_ms_serum_cols)], 1, mean)   # Cases
+case_avg <- median(df$mean_serum_disease)
+df$mean_serum_disease[df$mean_serum_disease == 0] <- case_avg
+
+##Beads
+df$mean_beads   <- apply(df[,c(bead_cols)], 1, mean)        # Beads
+bead_avg <- mean(df$mean_beads)
+df$mean_beads[df$mean_beads == 0] <- bead_avg
+```
+
+
+### b. FC calc
+```{r}
+# 4. Calculate Fold Change
+
+#CSF
+df_fc_csf_ref    <- makeFCdf(df,
+                         target_columns = ctrl_csf_cols,
+                         mean_column    = "mean_csf_ref",  onlyFC = T)
+df_fc_csf_disease <- makeFCdf(df,
+                          target_columns = c(origins_ms_csf_cols),
+                          mean_column    = "mean_csf_ref", onlyFC = T)
+
+#Serum
+df_fc_serum_ref    <- makeFCdf(df,
+                         target_columns = ctrl_serum_cols,
+                         mean_column    = "mean_serum_ref",  onlyFC = T)
+df_fc_serum_disease <- makeFCdf(df,
+                          target_columns = c(origins_ms_serum_cols, bead_cols),
+                          mean_column    = "mean_serum_ref", onlyFC = T)
+
+
+# Bind and delete
+df_fc <- cbind(df_fc_csf_ref, df_fc_csf_disease, df_fc_serum_ref, df_fc_serum_disease)
+rm(df_fc_csf_ref,df_fc_csf_disease, df_fc_serum_ref, df_fc_serum_disease)
+```
+
+
+### c. Z-score calc
+```{r}
+# 5. Calculate z score
+ctrl_fc_csf_cols <- paste0(ctrl_csf_cols, "_FC")
+ctrl_z_csf_cols <- str_replace_all(ctrl_fc_csf_cols, "_FC","_Z")
+
+ctrl_fc_serum_cols <- paste0(ctrl_serum_cols, "_FC")
+ctrl_z_serum_cols <- str_replace_all(ctrl_fc_serum_cols, "_FC","_Z")
+
+origins_ms_fc_csf_cols <- paste0(origins_ms_csf_cols, "_FC")
+origins_ms_z_csf_cols <- str_replace_all(origins_ms_fc_csf_cols, "_FC","_Z")
+
+origins_ms_fc_serum_cols <- paste0(origins_ms_serum_cols, "_FC")
+origins_ms_z_serum_cols <- str_replace_all(origins_ms_fc_serum_cols, "_FC","_Z")
+
+bead_fc_cols <- paste0(bead_cols, "_FC")
+bead_z_cols <- str_replace_all(bead_fc_cols, "_FC","_Z")
+
+#csf
+df_csf_z <- calcZscores(df_fc, target.samples = c(origins_ms_fc_csf_cols, ctrl_fc_csf_cols), reference.samples = ctrl_fc_csf_cols)
+names(df_csf_z) <- str_replace_all(names(df_csf_z), "_FC","_Z")
+
+#serum
+df_serum_z <- calcZscores(df_fc, target.samples = c(origins_ms_fc_serum_cols, ctrl_fc_serum_cols, bead_fc_cols), reference.samples = ctrl_fc_serum_cols)
+names(df_serum_z) <- str_replace_all(names(df_serum_z), "_FC","_Z")
+
+#Bind and delete
+df_z <- cbind(df_csf_z, df_serum_z)
+rm(df_csf_z, df_serum_z)
+
+#Stick the petide info back on
+df_fc_z <- cbind(df, df_fc, df_z)
+
+# remove input dataframes
+rm(df, df_fc, df_z)
+```
+
+## 7. Filter CSF/Serum PairSeq hits
+
+```{r}
+# CSF
+candidate_df_exp_fin_oldmeth <- candidate_df_csf_fin 
+
+candidate_df_exp_fin_oldmeth[is.na(candidate_df_exp_fin_oldmeth)] <- 0
+candidate_df_exp_fin <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap > 0,]
+candidate_df_exp_fin_singlet     <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap == 0,]
+candidate_df_exp_fin_singlet_sub <- filterPeptides(candidate_df_exp_fin_singlet,list_of_samples = origins_ms_csf_cols ,RPK_THRESH = 20,FC_THRESH = 100)
+
+candidate_df_exp_csf_fin <- rbind(candidate_df_exp_fin,candidate_df_exp_fin_singlet_sub)
+
+
+#serum
+candidate_df_exp_fin_oldmeth <- candidate_df_serum_fin 
+ 
+candidate_df_exp_fin_oldmeth[is.na(candidate_df_exp_fin_oldmeth)] <- 0
+candidate_df_exp_fin <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap > 0,]
+candidate_df_exp_fin_singlet     <- candidate_df_exp_fin_oldmeth[candidate_df_exp_fin_oldmeth$KmerOverlap == 0,]
+candidate_df_exp_fin_singlet_sub <- filterPeptides(candidate_df_exp_fin_singlet,list_of_samples = origins_ms_serum_cols ,RPK_THRESH = 20,FC_THRESH = 100)
+ 
+candidate_df_exp_serum_fin <- rbind(candidate_df_exp_fin,candidate_df_exp_fin_singlet_sub)
+
+```
+
+
+## ---CSF
+
+## 8. CSF filters
+
+### a. Make a filtered dataframe
+```{r}
+tinydf <- candidate_df_exp_csf_fin[c("peptide_id", origins_ms_fc_csf_cols, ctrl_fc_csf_cols, bead_fc_cols)]
+
+tinydf <- tinydf %>% mutate(count_rich = rowSums(tinydf[, origins_ms_fc_csf_cols[1:141]] > 10))
+tinydf <- tinydf %>% filter(count_rich > 10)
+top_peptides <- as.vector(tinydf$peptide_id)
+```
+
+
+### b. filters for top peptides based on rowSum
+```{r}
+top_candidates <- candidate_df_exp_csf_fin %>% filter(peptide_id %in% top_peptides)
+top_candidates <- arrange(top_candidates, gene)
+
+
+#peptide metadata for row annotation
+top_pep_meta <- top_candidates[, c("peptide_id", "gene")]
+peptide_id <- top_pep_meta[, 1]
+top_pep_meta <- top_pep_meta[ -1]
+rownames(top_pep_meta) <- peptide_id
+```
+
+
+### c. make log10 FC dataframes
+```{r}
+tiny_logfc <- top_candidates[c("peptide_id", origins_ms_fc_csf_cols, ctrl_fc_csf_cols )]
+
+peptide    <- tiny_logfc[, 1]
+tiny_logfc <- tiny_logfc[, -1]
+
+rownames(tiny_logfc) <- peptide
+tiny_logfc[tiny_logfc == 0] <- 1
+tiny_logfc <- log10(tiny_logfc)
+
+fc_metadata1       <- as.data.frame(origins_ms_fc_csf_cols)
+fc_metadata1$type  <- "MS"
+fc_metadata1$fluid <- "csf"
+colnames(fc_metadata1)[1] <- "sample" 
+
+fc_metadata2       <- as.data.frame(ctrl_fc_csf_cols)
+fc_metadata2$type  <- "OND"
+fc_metadata2$fluid <- "csf"
+colnames(fc_metadata2)[1] <- "sample" 
+
+fc_metadata <- rbind(fc_metadata1, fc_metadata2)
+rownames    <- fc_metadata[, 1]
+fc_metadata <- fc_metadata[, -1]
+rownames(fc_metadata) <- rownames
+```
+
+
+## ---Serum
+
+## 9. Filter top candidates
+```{r}
+tinydf <- candidate_df_exp_serum_fin[c("peptide_id", origins_ms_fc_serum_cols, ctrl_fc_serum_cols, bead_fc_cols)]
+
+target_serum_cols <- origins_ms_fc_serum_cols[1:length(origins_ms_fc_serum_cols)]
+
+tinydf <- tinydf %>% mutate(count_rich = rowSums(tinydf[, target_serum_cols] > 10))
+tinydf <- tinydf %>% filter(count_rich > 12)
+
+top_peptides <- as.vector(tinydf$peptide_id)
+
+## Organize top peptides
+top_candidates <- candidate_df_exp_serum_fin %>% filter(peptide_id %in% top_peptides)
+top_candidates <- arrange(top_candidates, gene)
+
+# peptide metadata for row annotation
+top_pep_meta <- top_candidates[, c("peptide_id", "gene")]
+peptide_id   <- top_pep_meta[, 1]
+top_pep_meta <- top_pep_meta[ -1]
+rownames(top_pep_meta) <- peptide_id
+```
+
+
+
+## 10. Motif dataframes
+
+### a. get motif dataframes
+```{r}
+df_fc_z$sequence[1]
+
+consensus_df <- df_fc_z %>% filter(grepl("P[AS].[SGA]R[SN][RLHK]", sequence))
+consensus_genelist <- consensus_df %>% select(peptide, gene, sequence, sequence, peptide_id)
+```
+
+
+### b. consensus totals
+```{r}
+long_consensus_serum_df <- consensus_df[c("peptide_id", origins_ms_serum_cols, ctrl_serum_cols )] %>% gather(key= sample, value = rpK, -peptide_id)  %>% group_by(sample) %>% summarise(sum_rpk = sum(rpK))
+
+
+long_consensus_serum_df$def <- "NA"
+for (i in 1:nrow(long_consensus_serum_df)){
+  if(long_consensus_serum_df$sample[i] %in% origins_ms_serum_cols){
+    long_consensus_serum_df$def[i] <- "MS"
+  } else if(long_consensus_serum_df$sample[i] %in% ctrl_serum_cols){
+    long_consensus_serum_df$def[i] <- "Control"
+  }
+}
+
+
+
+long_consensus_csf_df <- consensus_df[c("peptide_id", origins_ms_csf_cols, ctrl_csf_cols )] %>% gather(key= sample, value = rpK, -peptide_id)  %>% group_by(sample) %>% summarise(sum_rpk = sum(rpK))
+
+long_consensus_csf_df$def <- "NA"
+for (i in 1:nrow(long_consensus_csf_df)){
+  if(long_consensus_csf_df$sample[i] %in% origins_ms_csf_cols){
+    long_consensus_csf_df$def[i] <- "MS"
+  } else if(long_consensus_csf_df$sample[i] %in% ctrl_csf_cols){
+    long_consensus_csf_df$def[i] <- "Control"
+  }
+}
+```
+
+
+# SAVE ENV
+
+```{r}
+env_fh <- "objects/TEMP_ENV_FIG3.RData"
+save(list = ls(),file = env_fh)
+```

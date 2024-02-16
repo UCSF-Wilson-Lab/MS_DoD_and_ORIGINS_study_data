@@ -1,0 +1,302 @@
+---
+title: "Add sum RPKs to luminex dataframes"
+output: html_document
+---
+
+# START
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+library(gplots)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(png)
+library(ggplot2) 
+library(cowplot)
+library(ggrepel)
+library(plotly)  
+library(uwot)
+library(gridExtra)
+library(seqinr)
+library(DECIPHER)
+library(Biostrings)
+library(text.alignment)
+
+ANTIGEN_LIST <- c("CLASRP","RIMS2","HFM","EBV BRRF2","KRT75","SRRM3","TRIO","BSA","CD320 epitope","Aspergillus","SRSF4","E. Coli","Pseudomonas","EBV ENV")
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+
+# Diagnosis metadata
+metadata <- read.csv("data_origins/ORIGINSEPICPatientSamples.csv",stringsAsFactors = F) %>% clean_names()
+
+
+# Results Directories
+PLOT_DIR     <- "plots"
+TABLE_DIR    <- "Luminex_Data/processed_luminex_tables"
+
+# Objects for adding sum RPK values
+obj_fig3_fh       <- "objects/Fig3_Obj.RData"
+obj_fig3_input_fh <- "objects/Fig3_df_fc_z.RData"
+
+# Input tables - plot ready dataframes
+lux_df_fh      <- file.path(TABLE_DIR,"plot_df_Luminex_revised_processed.tsv")
+lux_df_long_fh <- file.path(TABLE_DIR,"long_plot_df_Luminex_revised_processed.tsv")
+
+# Output
+lux_df_output_fh      <- file.path(TABLE_DIR,"plot_df_Luminex_sum_RPK_revised_processed.tsv")
+```
+
+# -------------------------------------
+
+
+# LUMINEX + PHAGE
+
+## 1. Load Data
+
+### a. Load processed luminex dataframes
+```{r}
+lux_df      <- read.delim(lux_df_fh,sep = "\t",stringsAsFactors = F,check.names = F)
+lux_df_long <- read.delim(lux_df_long_fh,sep = "\t",stringsAsFactors = F,check.names = F)
+```
+
+### b. load ENV for Origins phage
+```{r}
+load(obj_fig3_input_fh)
+load(obj_fig3_fh)
+```
+
+
+## 2. Add RPK values from Origins
+
+### a. sum RPK
+```{r}
+long_consensus_csf_df$sample <- gsub("X", "", long_consensus_csf_df$sample)
+long_consensus_csf_df$sample <-  substr(long_consensus_csf_df$sample, 1, nchar(long_consensus_csf_df$sample)-14)
+long_consensus_csf_df$disc <- paste(long_consensus_csf_df$sample, "csf", sep = "_")
+
+long_consensus_serum_df$sample <- gsub("X", "", long_consensus_serum_df$sample)
+long_consensus_serum_df$sample <-  substr(long_consensus_serum_df$sample, 1, nchar(long_consensus_serum_df$sample)-14)
+long_consensus_serum_df$disc <- paste(long_consensus_serum_df$sample, "serum", sep = "_")
+
+long_consensus_df <- rbind(long_consensus_csf_df, long_consensus_serum_df)
+long_consensus_df$disc <- str_replace_all(long_consensus_df$disc,"_s_","_")
+
+# Only keep what overlaps
+long_consensus_df <- long_consensus_df[long_consensus_df$disc %in% lux_df$Sample,]
+
+lux_df$disc <- lux_df$Sample
+lux_df      <- left_join(lux_df, long_consensus_df, by= "disc")
+```
+
+### b. KRT75
+```{r}
+df_krt75 <- df_fc_z %>% filter(peptide_id %in% c("KRT75_287685", "KRT75_287686"))
+
+csf_names <- paste("X", unique(lux_df$Patient), "_csf_cgorigins", sep = "")
+serum_names <- paste("X", unique(lux_df$Patient), "_serum_cgorigins", sep = "")
+names <- c(csf_names, serum_names)
+
+df_krt75 <- df_krt75[, colnames(df_krt75) %in% names]
+
+
+df_krt75_t <- transpose(df_krt75)
+df_krt75_t$sample <- colnames(df_krt75)
+df_krt75_t$krt75_pep_rpk <- df_krt75_t$V1 + df_krt75_t$V2
+df_krt75_t$sample <- gsub("X", "", df_krt75_t$sample)
+df_krt75_t$fluid <- strsplit(df_krt75_t$sample, "_") %>% sapply( "[", 2 )
+df_krt75_t$sample <- strsplit(df_krt75_t$sample, "_") %>% sapply( "[", 1 )
+df_krt75_t$disc <- paste(df_krt75_t$sample, df_krt75_t$fluid, sep = "_")
+df_krt75_t <- df_krt75_t[, c("disc", "krt75_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_krt75_t, by= "disc")
+```
+
+### c. RIMS2
+```{r}
+df_rims2 <- df_fc_z %>% filter(peptide_id %in% c("RIMS2_627827", "RIMS2_337979", "RIMS2_306095", "RIMS2_306096"))
+
+df_rims2 <- df_rims2[, colnames(df_rims2) %in% names]
+
+
+df_rims2_t <- transpose(df_rims2)
+df_rims2_t$sample <- colnames(df_rims2)
+df_rims2_t$rims2_pep_rpk <- df_rims2_t$V1 + df_rims2_t$V2 + df_rims2_t$V3 + df_rims2_t$V4 
+df_rims2_t$sample <- gsub("X", "", df_rims2_t$sample)
+df_rims2_t$fluid <- strsplit(df_rims2_t$sample, "_") %>% sapply( "[", 2 )
+df_rims2_t$sample <- strsplit(df_rims2_t$sample, "_") %>% sapply( "[", 1 )
+df_rims2_t$disc <- paste(df_rims2_t$sample, df_rims2_t$fluid, sep = "_")
+df_rims2_t <- df_rims2_t[, c("disc", "rims2_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_rims2_t, by= "disc")
+```
+
+### d. SRSF4
+```{r}
+df_srsf4 <- df_fc_z %>% filter(peptide_id %in% c("SRSF4_342020", "SRSF4_342019", "SRSF4_682211"))
+
+df_srsf4 <- df_srsf4[, colnames(df_srsf4) %in% names]
+
+
+df_srsf4_t <- transpose(df_srsf4)
+df_srsf4_t$sample <- colnames(df_srsf4)
+df_srsf4_t$srsf4_pep_rpk <- df_srsf4_t$V1 + df_srsf4_t$V2 + df_srsf4_t$V3 
+df_srsf4_t$sample <- gsub("X", "", df_srsf4_t$sample)
+df_srsf4_t$fluid <- strsplit(df_srsf4_t$sample, "_") %>% sapply( "[", 2 )
+df_srsf4_t$sample <- strsplit(df_srsf4_t$sample, "_") %>% sapply( "[", 1 )
+df_srsf4_t$disc <- paste(df_srsf4_t$sample, df_srsf4_t$fluid, sep = "_")
+df_srsf4_t <- df_srsf4_t[, c("disc", "srsf4_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_srsf4_t, by= "disc")
+```
+
+### e. TRIO
+```{r}
+df_trio <- df_fc_z %>% filter(peptide_id %in% c("TRIO_395474"))
+df_trio <- df_trio[, colnames(df_trio) %in% names]
+
+
+df_trio_t <- transpose(df_trio)
+df_trio_t$sample <- colnames(df_trio)
+df_trio_t$trio_pep_rpk <- df_trio_t$V1 
+df_trio_t$sample <- gsub("X", "", df_trio_t$sample)
+df_trio_t$fluid <- strsplit(df_trio_t$sample, "_") %>% sapply( "[", 2 )
+df_trio_t$sample <- strsplit(df_trio_t$sample, "_") %>% sapply( "[", 1 )
+df_trio_t$disc <- paste(df_trio_t$sample, df_trio_t$fluid, sep = "_")
+df_trio_t <- df_trio_t[, c("disc", "trio_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_trio_t, by= "disc")
+```
+
+### f. RIMS2 Protein
+```{r}
+df_rims2_prot <- df_fc_z %>% filter(gene == "RIMS2")
+df_rims2_prot <- df_rims2_prot[, colnames(df_rims2_prot) %in% names]
+
+
+df_rims2_prot_t <- transpose(df_rims2_prot)
+df_rims2_prot_t$sample <- colnames(df_rims2_prot)
+rim_peps <- colnames(df_rims2_prot_t)[1:205]
+df_rims2_prot_t$rims2_prot_pep_rpk <- df_rims2_prot_t %>% select(rim_peps) %>% rowSums(na.rm=TRUE)
+df_rims2_prot_t <- df_rims2_prot_t %>% select(c("sample", "rims2_prot_pep_rpk"))
+df_rims2_prot_t$sample <- gsub("X", "", df_rims2_prot_t$sample)
+df_rims2_prot_t$fluid <- strsplit(df_rims2_prot_t$sample, "_") %>% sapply( "[", 2 )
+df_rims2_prot_t$sample <- strsplit(df_rims2_prot_t$sample, "_") %>% sapply( "[", 1 )
+df_rims2_prot_t$disc <- paste(df_rims2_prot_t$sample, df_rims2_prot_t$fluid, sep = "_")
+df_rims2_prot_t <- df_rims2_prot_t[, c("disc", "rims2_prot_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_rims2_prot_t, by= "disc")
+```
+
+### g. CLASRP
+```{r}
+df_clasrp <- df_fc_z %>% filter(peptide_id %in% c("CLASRP_13378", "CLASRP_441187", "CLASRP_13379"))
+
+df_clasrp <- df_clasrp[, colnames(df_clasrp) %in% names]
+
+
+df_clasrp_t <- transpose(df_clasrp)
+df_clasrp_t$sample <- colnames(df_clasrp)
+df_clasrp_t$clasrp_pep_rpk <- df_clasrp_t$V1 + df_clasrp_t$V2 + df_clasrp_t$V3 
+df_clasrp_t$sample <- gsub("X", "", df_clasrp_t$sample)
+df_clasrp_t$fluid <- strsplit(df_clasrp_t$sample, "_") %>% sapply( "[", 2 )
+df_clasrp_t$sample <- strsplit(df_clasrp_t$sample, "_") %>% sapply( "[", 1 )
+df_clasrp_t$disc <- paste(df_clasrp_t$sample, df_clasrp_t$fluid, sep = "_")
+df_clasrp_t <- df_clasrp_t[, c("disc", "clasrp_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_clasrp_t, by= "disc")
+```
+
+### h. SRRM3
+```{r}
+df_srrm3 <- df_fc_z %>% filter(peptide_id %in% c("SRRM3_613856", "SRRM3_558302"))
+
+df_srrm3 <- df_srrm3[, colnames(df_srrm3) %in% names]
+
+
+df_srrm3_t <- transpose(df_srrm3)
+df_srrm3_t$sample <- colnames(df_srrm3)
+df_srrm3_t$srrm3_pep_rpk <- df_srrm3_t$V1 + df_srrm3_t$V2 
+df_srrm3_t$sample <- gsub("X", "", df_srrm3_t$sample)
+df_srrm3_t$fluid <- strsplit(df_srrm3_t$sample, "_") %>% sapply( "[", 2 )
+df_srrm3_t$sample <- strsplit(df_srrm3_t$sample, "_") %>% sapply( "[", 1 )
+df_srrm3_t$disc <- paste(df_srrm3_t$sample, df_srrm3_t$fluid, sep = "_")
+df_srrm3_t <- df_srrm3_t[, c("disc", "srrm3_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_srrm3_t, by= "disc")
+```
+
+### i. Sum of all Target peps
+```{r}
+df_sum_pep <- df_fc_z %>% filter(peptide_id %in% c("KRT75_287685", "KRT75_287686", "RIMS2_627827", "RIMS2_337979", "RIMS2_306095", "RIMS2_306096", "SRSF4_342020", "SRSF4_342019", "SRSF4_682211", "SRSF7_101254", "TRIO_395474","CLASRP_13378", "CLASRP_441187", "CLASRP_13379","SRRM3_613856", "SRRM3_558302"))
+
+df_sum_pep <- df_sum_pep[, colnames(df_sum_pep) %in% names]
+
+
+df_sum_pep_t <- transpose(df_sum_pep)
+df_sum_pep_t$sample <- colnames(df_sum_pep)
+df_sum_pep_t$sum_pep_pep_rpk <- rowSums(df_sum_pep_t[,! names(df_sum_pep_t) %in% "sample"])
+df_sum_pep_t$sample <- gsub("X", "", df_sum_pep_t$sample)
+df_sum_pep_t$fluid <- strsplit(df_sum_pep_t$sample, "_") %>% sapply( "[", 2 )
+df_sum_pep_t$sample <- strsplit(df_sum_pep_t$sample, "_") %>% sapply( "[", 1 )
+df_sum_pep_t$disc <- paste(df_sum_pep_t$sample, df_sum_pep_t$fluid, sep = "_")
+df_sum_pep_t <- df_sum_pep_t[, c("disc", "sum_pep_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_sum_pep_t, by= "disc")
+```
+
+### j. Sum RPK no SRRM3
+```{r}
+df_sum_pep <- df_fc_z %>% filter(peptide_id %in% c("KRT75_287685", "KRT75_287686", "RIMS2_627827", "RIMS2_337979", "RIMS2_306095", "RIMS2_306096", "SRSF4_342020", "SRSF4_342019", "SRSF4_682211", "SRSF7_101254", "TRIO_395474","CLASRP_13378", "CLASRP_441187", "CLASRP_13379"))
+
+df_sum_pep <- df_sum_pep[, colnames(df_sum_pep) %in% names]
+
+
+df_sum_pep_t <- transpose(df_sum_pep)
+df_sum_pep_t$sample <- colnames(df_sum_pep)
+df_sum_pep_t$sum_pep_pep_rpk_no_SRRM3 <- rowSums(df_sum_pep_t[,! names(df_sum_pep_t) %in% "sample"])
+df_sum_pep_t$sample <- gsub("X", "", df_sum_pep_t$sample)
+df_sum_pep_t$fluid <- strsplit(df_sum_pep_t$sample, "_") %>% sapply( "[", 2 )
+df_sum_pep_t$sample <- strsplit(df_sum_pep_t$sample, "_") %>% sapply( "[", 1 )
+df_sum_pep_t$disc <- paste(df_sum_pep_t$sample, df_sum_pep_t$fluid, sep = "_")
+df_sum_pep_t <- df_sum_pep_t[, c("disc", "sum_pep_pep_rpk_no_SRRM3")]
+
+lux_df <- left_join(lux_df, df_sum_pep_t, by= "disc")
+```
+
+### k. Mean of all target peptides
+```{r}
+df_mean_pep <- df_fc_z %>% filter(peptide_id %in% c("KRT75_287685", "KRT75_287686", "RIMS2_627827", "RIMS2_337979", "RIMS2_306095", "RIMS2_306096", "SRSF4_342020", "SRSF4_342019", "SRSF4_682211", "SRSF7_101254", "TRIO_395474","CLASRP_13378", "CLASRP_441187", "CLASRP_13379","SRRM3_613856", "SRRM3_558302"))
+
+df_mean_pep <- df_mean_pep[, colnames(df_mean_pep) %in% names]
+
+
+df_mean_pep_t <- transpose(df_mean_pep)
+df_mean_pep_t$sample <- colnames(df_mean_pep)
+df_mean_pep_t$mean_pep_pep_rpk <- rowMeans(df_mean_pep_t[,! names(df_mean_pep_t) %in% "sample"])
+df_mean_pep_t$sample <- gsub("X", "", df_mean_pep_t$sample)
+df_mean_pep_t$fluid <- strsplit(df_mean_pep_t$sample, "_") %>% sapply( "[", 2 )
+df_mean_pep_t$sample <- strsplit(df_mean_pep_t$sample, "_") %>% sapply( "[", 1 )
+df_mean_pep_t$disc <- paste(df_mean_pep_t$sample, df_mean_pep_t$fluid, sep = "_")
+df_mean_pep_t <- df_mean_pep_t[, c("disc", "mean_pep_pep_rpk")]
+
+lux_df <- left_join(lux_df, df_mean_pep_t, by= "disc")
+```
+
+
+# 3. Write table
+```{r}
+write.table(lux_df,file = lux_df_output_fh,sep = "\t",row.names = F)
+```

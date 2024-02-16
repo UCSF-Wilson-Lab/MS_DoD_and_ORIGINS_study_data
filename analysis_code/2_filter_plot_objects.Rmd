@@ -1,0 +1,101 @@
+---
+title: "Filter out plot objects"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(viridis)
+library(png)
+library(ggplot2) # extra
+library(cowplot)
+library(ggrepel)
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+PLOT_DIR <- "plots"
+```
+
+
+# -------------------------------------
+
+
+# DOD
+
+# FIGURE 1
+
+
+## 1. load ENV 
+```{r}
+env_fh <- "objects/TEMP_ENV_FIG1and2.RData"
+load(env_fh)
+```
+
+
+## 2. Save Objects
+```{r}
+obj_fig1_fh       <- "objects/Fig1_Obj.RData"
+obj_fig1_input_fh <- "objects/Fig1_df_fc_z.RData"
+save(tinydf,tiny_fc,tiny_logfc,tiny_z,
+     candidate_df_exp_fin,top_candidates,
+     metadata,fc_metadata,z_metadata,prepost,
+     all_names,fc_names,
+     file = obj_fig1_fh)
+save(df_fc_z,file = obj_fig1_input_fh)
+```
+
+
+# FIGURE 2
+
+## 1. Save Objects
+```{r}
+obj_fig2_fh <- "objects/Fig2_Obj.RData"
+save(consensus_df,consensus_genelist,file = obj_fig2_fh)
+```
+
+
+# -------------------------------------
+
+
+# ORIGINS
+
+# FIGURE 3
+
+
+## 1. load ENV
+```{r}
+env_fh <- "objects/TEMP_ENV_FIG3.RData"
+load(env_fh)
+```
+
+
+## 2. Save Objects
+```{r}
+obj_fig3_fh       <- "objects/Fig3_Obj.RData"
+obj_fig3_input_fh <- "objects/Fig3_df_fc_z.RData"
+
+
+save(candidate_df_exp_csf_fin,candidate_df_exp_serum_fin,
+     metadata,fc_metadata,consensus_df,consensus_genelist,
+     long_consensus_csf_df,long_consensus_serum_df,
+     origins_ms_fc_csf_cols, ctrl_fc_csf_cols, bead_fc_cols,
+     origins_ms_fc_serum_cols, ctrl_fc_serum_cols, bead_fc_cols,
+     file = obj_fig3_fh)
+
+save(df_fc_z,file = obj_fig3_input_fh)
+```
+

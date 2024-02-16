@@ -1,0 +1,858 @@
+---
+title: "Define DoD Clusters"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+library(gplots)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(png)
+library(ggplot2) 
+library(cowplot)
+library(ggrepel)
+library(uwot)
+library(gridExtra)
+library(seqinr)
+library(DECIPHER)
+library(Biostrings)
+library(text.alignment)
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+PLOT_DIR_QC       <- "plots/QC"
+PLOT_DIR_MAIN     <- "plots"
+TABLE_DIR_MAIN    <- "tables"
+```
+
+
+# FUNCTIONS
+```{r}
+# peptide clustering
+getGroupPeptideOrderHeatmap <- function(plot_df,select_samples,select_peptides) {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  plot_df     <- plot_df[row.names(plot_df) %in% select_peptides,]
+  heatmap_mtx <- as.matrix(plot_df)
+  
+  # gene to peptide convertion vec 
+  gene_to_peptide_vec        <- row.names(heatmap_mtx)
+  names(gene_to_peptide_vec) <- tstrsplit(gene_to_peptide_vec,"_")[[1]]
+  
+  
+  # 1 - Heirarchical clustering - all peptides first 
+  d        <- dist(heatmap_mtx)
+  hc       <- hclust(d)
+  hc_peptide_order <- rownames(heatmap_mtx)[hc$order]
+  
+  # establish gene order 
+  clustered_gene_order <- unique(tstrsplit(hc_peptide_order,"_")[[1]])
+  
+  final_peptide_order <- c()
+  for (gene in clustered_gene_order) {
+    target_peps <- as.character(gene_to_peptide_vec[names(gene_to_peptide_vec) %in% gene])
+    
+    if(length(target_peps) == 1){
+      final_peptide_order <- c(final_peptide_order,target_peps)
+    } else{
+      cat(paste0(gene, "\n"))
+      gene_mtx <- heatmap_mtx[row.names(heatmap_mtx) %in% target_peps,]
+      d        <- dist(gene_mtx)
+      hc       <- hclust(d)
+      gene_pep_order <- rownames(gene_mtx)[hc$order]
+      final_peptide_order <- c(final_peptide_order,gene_pep_order)
+    }
+  }
+  
+  return(final_peptide_order)
+}
+
+
+# sample clustering
+getGroupSampleOrderHeatmap <- function(plot_df,select_samples,select_peptides = NULL) {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  if(!is.null(select_peptides)){
+    plot_df <- plot_df[row.names(plot_df) %in% select_peptides,]
+  }
+  heatmap_mtx <- t(as.matrix(plot_df))
+  
+  # Heirarchical clustering 
+  d        <- dist(heatmap_mtx)
+  hc       <- hclust(d)
+  hc_sample_order <- rownames(heatmap_mtx)[hc$order]
+  
+  return(hc_sample_order)
+}
+
+
+# sample clustering (Pre and Post matched)
+getGroupSampleOrderHeatmapPrePost <- function(plot_df,select_samples,select_peptides = NULL,
+                                              regex_pre = "_pre_", regex_post = "_post_") {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  if(!is.null(select_peptides)){
+    plot_df <- plot_df[row.names(plot_df) %in% select_peptides,]
+  }
+  heatmap_mtx <- t(as.matrix(plot_df))
+  
+  # Create pre and post sample vectors
+  pre_samples         <- rownames(heatmap_mtx)[grep(regex_pre,rownames(heatmap_mtx))]
+  names(pre_samples)  <- tstrsplit(pre_samples,"_")[[1]]
+  post_samples        <- rownames(heatmap_mtx)[grep(regex_post,rownames(heatmap_mtx))]
+  names(post_samples) <- tstrsplit(post_samples,"_")[[1]]
+  
+  # Heirarchical clustering - Pre
+  pre_mtx  <- heatmap_mtx[rownames(heatmap_mtx) %in% pre_samples,]
+  d        <- dist(pre_mtx)
+  hc       <- hclust(d)
+  hc_pre_sample_order <- rownames(pre_mtx)[hc$order]
+  
+  # Final pre post order
+  final_sample_order <- c()
+  for (pre in hc_pre_sample_order) {
+    pt   <- tstrsplit(pre,"_")[[1]]
+    post <- as.character(post_samples[names(post_samples) %in% pt])
+    final_sample_order <- c(final_sample_order,pre,post)
+  }
+  
+  return(final_sample_order)
+}
+
+# formatHeatmapForGGPLOT
+# - format heatmap data frame for ggplot2
+# - columns = samples, rows = peptides
+formatPepHeatmapForGGPLOT <- function(heatmap_input) {
+  heatmap_input <- as.data.frame(heatmap_input)
+  
+  createEntry <- function(pep,heatmap_input) {
+    col_names_plot <- c("peptide","sample","value")
+    entry <- data.frame(matrix(nrow = ncol(heatmap_input),ncol = 3))
+    names(entry) <- col_names_plot
+    
+    subset_heatmap <- heatmap_input[pep,]
+    samples        <- names(heatmap_input)
+
+    # Fill entry
+    entry$peptide <- pep
+    entry$sample  <- samples
+    entry$value   <- as.numeric(subset_heatmap[pep,])
+    
+    return(entry)
+  }
+  
+  
+  pep_list <- as.list(rownames(heatmap_input))
+  entry_df_list <- lapply(pep_list, createEntry,heatmap_input=heatmap_input)
+  plot_df       <- do.call(rbind,entry_df_list)
+  
+  
+  plot_df$peptide <- factor(plot_df$peptide,levels = row.names(heatmap_input))
+  plot_df$sample  <- factor(plot_df$sample,levels = names(heatmap_input))
+  
+  return(plot_df)
+}
+```
+
+
+# 1. Load Fig ENV
+```{r}
+fig_env <- "objects/ENV_PLOTS.RData"
+load(fig_env)
+```
+
+# -------------------------------------
+
+# FIGURE 1 - DOD
+
+# 1. load objects and metadata
+
+### a. all relevant tables
+```{r}
+# Cluster 1 metadata
+cluster1_metadata_fh <- "resources/cluster1_metadata_manually_identified_clusters.csv"
+cluster1_list_fh     <- "resources/manually_identified_clusters.csv"
+
+cluster1_metadata    <- read.csv(cluster1_metadata_fh, stringsAsFactors = F)
+cluster_list_df      <- read.csv(cluster1_list_fh, stringsAsFactors = F)
+cluster1_list_df     <- cluster_list_df[cluster_list_df$cluster %in% c("cluster1"),]
+cluster1_ids_updated <- unique(cluster1_list_df$studyid)
+```
+
+### b. create Consensus cluster df
+```{r}
+# UMAP Cluster 1
+subset_umap_fig1 <- as.data.frame(sample_tiny_umap)
+subset_umap_fig1 <- subset_umap_fig1[subset_umap_fig1$V1 < -2.5,]
+subset_umap_fig1 <- subset_umap_fig1[subset_umap_fig1$V2 > 1,]
+
+# Make master cluster df
+master_cluster_df <- cluster_list_df
+master_cluster_df <- master_cluster_df[,c("studyid","cluster")]
+master_cluster_df <- unique(master_cluster_df)
+
+list1_cluster1_ids <- unique(cluster1_metadata$studyid)
+list2_umap_cluster1_ids <- unique(tstrsplit(row.names(subset_umap_fig1),"_")[[1]])
+
+missing_cluster_studyid <- c(list1_cluster1_ids,list2_umap_cluster1_ids)[! c(list1_cluster1_ids,list2_umap_cluster1_ids) %in% master_cluster_df$studyid]
+
+new_entry        <- data.frame(matrix(nrow = 1,ncol = 2))
+names(new_entry) <- c("studyid","cluster")
+new_entry$studyid <- missing_cluster_studyid
+new_entry$cluster <- "extra"
+master_cluster_df <- rbind(master_cluster_df,new_entry)
+
+# Add in columns for other cluster 1 assignments used
+orig_clus1_col <- master_cluster_df$studyid
+umap_clus1_col <- master_cluster_df$studyid
+
+orig_clus1_col[orig_clus1_col %in% list1_cluster1_ids] <- "cluster1"
+orig_clus1_col[! orig_clus1_col %in% "cluster1"]       <- "extra"
+
+umap_clus1_col[umap_clus1_col %in% list2_umap_cluster1_ids] <- "cluster1"
+umap_clus1_col[! umap_clus1_col %in% "cluster1"]            <- "extra"
+
+master_cluster_df$cluster_manual    <- orig_clus1_col
+master_cluster_df$cluster_umap_fig1 <- umap_clus1_col
+```
+
+
+# 2. Re-cluster all pre post samples
+```{r}
+# Cluster Pre and post separately
+ordered_all_samples       <- getGroupSampleOrderHeatmap(tiny_logfc, names(tiny_logfc))
+
+peptides_order_all_samples <- getGroupPeptideOrderHeatmap(plot_df = tiny_logfc,
+                                                         select_samples = names(tiny_logfc),
+                                                         select_peptides = row.names(tiny_logfc))
+```
+
+
+# 3. Make heatmap df
+```{r}
+df_all_logfc              <- tiny_logfc
+df_all_logfc[df_all_logfc < 0] <- 0
+
+# Re-order
+df_all_logfc <- df_all_logfc[,ordered_all_samples]
+df_all_logfc <- df_all_logfc[peptides_order_all_samples,]
+
+df_all_logfc_plot     <- formatPepHeatmapForGGPLOT(heatmap_input = df_all_logfc)
+```
+
+
+# 4. Plot heatmap
+
+### --theme
+```{r}
+# HEATMAP commands
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100) 
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") # plot.margin = MARGINS
+EXPAND  = c(0.0,0.0)
+LIMS_ORIG = c(-2, 4)
+LIMS      = c(0, 4.25)
+label_theme_heatmap_ggplot <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.text.y=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+# CURRENTLY USED
+updated_gradient_cmd <- scale_fill_gradientn(colours = COLOR_PAL,limits = LIMS_ORIG)
+```
+
+```{r}
+# All samples 
+plot_all_heatmap <- ggplot(df_all_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+```
+
+# 5. Create sum RPK barplots
+
+### a. Fig 1a - make input dfs
+```{r}
+# Samples
+all_samples_redoclus <- unique(df_all_logfc_plot$sample)
+all_samples_redoclus <- str_replace_all(all_samples_redoclus,"_FC","")
+
+df_rpk_all <- top_candidates
+row.names(df_rpk_all) <- df_rpk_all$peptide_id
+
+# Only keep select peptides
+df_rpk_all_motif   <- df_rpk_all[row.names(df_rpk_all) %in% motif_peptides,]
+
+# All peps df
+df_rpk_all  <- df_rpk_all[,all_samples_redoclus]
+all_sum_rpk <- as.data.frame(colSums(df_rpk_all))
+names(all_sum_rpk) <- "sum_rpk"
+all_sum_rpk$sample <- row.names(all_sum_rpk)
+all_sum_rpk$sample_fc <- paste(all_sum_rpk$sample,"FC", sep = "_")
+
+# motif peps only
+df_rpk_all_motif  <- df_rpk_all_motif[,all_samples_redoclus]
+all_motif_sum_rpk <- as.data.frame(colSums(df_rpk_all_motif))
+names(all_motif_sum_rpk) <- "sum_rpk"
+all_motif_sum_rpk$sample <- row.names(all_motif_sum_rpk)
+all_motif_sum_rpk$sample_fc <- paste(all_motif_sum_rpk$sample,"FC", sep = "_")
+
+
+# Change levels based on annot bar
+all_sum_rpk$sample_fc <- factor(all_sum_rpk$sample_fc,levels = ordered_all_samples)
+all_motif_sum_rpk$sample_fc <- factor(all_motif_sum_rpk$sample_fc,levels = ordered_all_samples)
+```
+
+### b. sum RPK of select peptides
+* sort by highest row sum RPK
+* calculate ratio of case sum RPK / HC sum RPK
+```{r}
+### Separate case and hc
+case_samples <- all_samples_redoclus[grep("Case",all_samples_redoclus)]
+hc_samples   <- all_samples_redoclus[grep("healthy",all_samples_redoclus)]
+
+pep_sum_rpk_df      <- as.data.frame(rowSums(df_rpk_all))
+pep_case_sum_rpk_df <- as.data.frame(rowSums(df_rpk_all[,case_samples]))
+pep_hc_sum_rpk_df   <- as.data.frame(rowSums(df_rpk_all[,hc_samples]))
+names(pep_sum_rpk_df) <- "sum_rpk_all"
+names(pep_case_sum_rpk_df) <- "sum_rpk_case"
+names(pep_hc_sum_rpk_df) <- "sum_rpk_hc"
+
+pep_sum_rpk_df <- cbind(pep_sum_rpk_df,pep_case_sum_rpk_df,pep_hc_sum_rpk_df)
+pep_sum_rpk_df$ratio_case_hc <- pep_sum_rpk_df$sum_rpk_case / pep_sum_rpk_df$sum_rpk_hc
+pep_sum_rpk_df$ratio_hc_case <- pep_sum_rpk_df$sum_rpk_hc / pep_sum_rpk_df$sum_rpk_case
+
+
+### Get a subset of peptides
+pep_sum_rpk_df_sub <- pep_sum_rpk_df[pep_sum_rpk_df$sum_rpk_all > 800,]
+pep_sum_rpk_df_sub <- pep_sum_rpk_df_sub[pep_sum_rpk_df_sub$ratio_case_hc > 6,]
+target_enriched_peptides <- row.names(pep_sum_rpk_df_sub)
+
+# Only keep select peptides
+#  - originally only kept motif peptides (motif_peptides)
+#  - now we are summing fig 1b peptides
+df_rpk_all_target   <- df_rpk_all[row.names(df_rpk_all) %in% target_enriched_peptides,]
+
+# target peps only
+df_rpk_all_target  <- df_rpk_all_target[,all_samples_redoclus]
+all_target_sum_rpk <- as.data.frame(colSums(df_rpk_all_target))
+names(all_target_sum_rpk) <- "sum_rpk"
+all_target_sum_rpk$sample <- row.names(all_target_sum_rpk)
+all_target_sum_rpk$sample_fc <- paste(all_target_sum_rpk$sample,"FC", sep = "_")
+
+
+# Change levels based on annot bar
+all_target_sum_rpk$sample_fc <- factor(all_target_sum_rpk$sample_fc,levels = ordered_all_samples)
+```
+
+
+
+
+### c. Plot
+
+### --themes
+```{r}
+BAR_THEME_FIG1<- theme(legend.position="none", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title.x=element_blank(),
+                 axis.text=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_text(size=12),
+                 plot.background = element_blank())
+```
+
+```{r,fig.height=3,fig.width=14}
+bar_sumrpk_all <-ggplot(data=all_sum_rpk, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) + BAR_THEME_FIG1
+
+# motif peptides
+bar_sumrpk_all_motif <-ggplot(data=all_motif_sum_rpk, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+
+# Target peptides
+bar_sumrpk_all_target <-ggplot(data=all_target_sum_rpk, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+
+```
+
+# 6. Plot Panel - PDF
+
+```{r,fig.height=11,fig.width=14}
+all_hp_panel <- plot_grid(bar_sumrpk_all_motif,bar_sumrpk_all_target,bar_sumrpk_all,plot_all_heatmap,ncol = 1,align = "v",rel_heights = c(2,2,2,5))
+
+plot_full_heatmap_panel_fh <- file.path(PLOT_DIR_QC,"heatmap_all_samples_panel.pdf")
+pdf(file = plot_full_heatmap_panel_fh,height = 11,width = 14)
+all_hp_panel
+dev.off()
+```
+
+
+# 7. Subset cluster samples
+```{r}
+mean_target <- mean(all_target_sum_rpk$sum_rpk)
+
+new_cluster_df <- all_target_sum_rpk[all_target_sum_rpk$sum_rpk > 200,]
+
+in_master_table_col <- tstrsplit(new_cluster_df$sample,"_")[[1]]
+in_master_table_col[in_master_table_col %in% master_cluster_df$studyid] <- "yes"
+in_master_table_col[! in_master_table_col %in% "yes"] <- "no"
+
+new_cluster_df$in_master_table <- in_master_table_col
+```
+
+
+# ---
+
+
+# 8. Re-cluster round 2
+
+### a. re-cluster
+```{r}
+# Cluster Pre and post separately 
+samples_to_cluster <- names(tiny_logfc)[names(tiny_logfc) %in% new_cluster_df$sample_fc]
+tiny_logfc_sub     <- tiny_logfc[,names(tiny_logfc) %in% samples_to_cluster]
+
+ordered_all_samples_2       <- getGroupSampleOrderHeatmap(tiny_logfc_sub, names(tiny_logfc_sub))
+
+peptides_order_all_samples_2 <- getGroupPeptideOrderHeatmap(plot_df = tiny_logfc_sub,
+                                                         select_samples = names(tiny_logfc_sub),
+                                                         select_peptides = row.names(tiny_logfc_sub))
+```
+
+### b. re-make heatmap df
+```{r}
+# Re-order
+df_all_logfc2 <- df_all_logfc[,ordered_all_samples_2]
+df_all_logfc2 <- df_all_logfc2[peptides_order_all_samples_2,]
+
+df_all_logfc_plot2     <- formatPepHeatmapForGGPLOT(heatmap_input = df_all_logfc2)
+```
+
+### c. re-plot
+```{r}
+# All samples 
+plot_all_heatmap2 <- ggplot(df_all_logfc_plot2, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+```
+
+# 9. Redo Barplots
+
+### a. subset and re-level
+```{r}
+all_sum_rpk2        <- all_sum_rpk[all_sum_rpk$sample_fc %in% ordered_all_samples_2,]
+all_motif_sum_rpk2   <- all_motif_sum_rpk[all_motif_sum_rpk$sample_fc %in% ordered_all_samples_2,]
+all_target_sum_rpk2 <- all_target_sum_rpk[all_target_sum_rpk$sample_fc %in% ordered_all_samples_2,]
+
+all_sum_rpk2$sample_fc <- factor(all_sum_rpk2$sample_fc,levels = ordered_all_samples_2)
+all_motif_sum_rpk2$sample_fc <- factor(all_motif_sum_rpk2$sample_fc,levels = ordered_all_samples_2)
+all_target_sum_rpk2$sample_fc <- factor(all_target_sum_rpk2$sample_fc,levels = ordered_all_samples_2)
+```
+
+### b. re-plot barplots
+```{r,fig.height=3,fig.width=14}
+bar_sumrpk_all2 <-ggplot(data=all_sum_rpk2, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) + BAR_THEME_FIG1
+
+# motif peptides
+bar_sumrpk_all_motif2 <-ggplot(data=all_motif_sum_rpk2, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+
+# Target peptides
+bar_sumrpk_all_target2 <-ggplot(data=all_target_sum_rpk2, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+
+```
+
+
+# 10. Panel round 2
+```{r,fig.height=11,fig.width=14}
+all_hp_panel2 <- plot_grid(bar_sumrpk_all_motif2,bar_sumrpk_all_target2,bar_sumrpk_all2,plot_all_heatmap2,ncol = 1,align = "v",rel_heights = c(2,2,2,5))
+```
+
+# ---
+
+# 11. Redo UMAP
+
+### a. Run UMAP
+```{r,fig.height=5,fig.width=6}
+set.seed(2345678)
+
+input_umap_df2 <- input_umap_df[row.names(input_umap_df) %in% ordered_all_samples_2,]
+sample_tiny_umap2 <- umap(input_umap_df2, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 100000,init = "random")
+```
+
+### b. brackets
+```{r}
+color_bracket_col2 <- row.names(sample_tiny_umap2)
+
+# Swap sample names for same color brackets used in heatmap
+case_and_hc_motif_df      <- rbind(df_annot_bar_case_motif,df_annot_bar_hc_motif)
+bracket_conv_list        <- case_and_hc_motif_df$color_bracket
+names(bracket_conv_list) <- case_and_hc_motif_df$sample_fc
+bracket_conv_list        <- as.list(bracket_conv_list)
+
+
+for (i in 1:length(color_bracket_col2)) {
+  curr_val <- color_bracket_col2[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col2[i] <- val_bracket
+}
+
+# Make manual color grad
+uni_brackets_umap2 <- unique(color_bracket_col2)
+bar_colors_umap2   <- c()
+for (bracket in as.numeric(uni_brackets_umap2)) {
+  bar_colors_umap2 <- c(bar_colors_umap2,color_list[bracket])
+}
+names(bar_colors_umap2) <- uni_brackets_umap2
+```
+
+
+### c. Plot
+```{r,fig.height=5,fig.width=6}
+# original umap_plot1
+umap_reclus <- tibble(x = sample_tiny_umap2[,1],y = sample_tiny_umap2[,2],sample = color_bracket_col2) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=1) + scale_color_manual(values = bar_colors_umap2) + label_theme_umap_v2
+```
+
+# 12. list Cluster 1 and 2
+```{r}
+new_clus1_df <- sample_tiny_umap2[sample_tiny_umap2[,1] > 0,]
+new_clus3_df <- sample_tiny_umap2[! row.names(sample_tiny_umap2) %in% row.names(new_clus1_df),]
+```
+
+# ---
+
+# 13. Separate cluster 1
+
+### a. Run UMAP
+```{r,fig.height=5,fig.width=6}
+set.seed(3456789)
+
+input_umap_df3 <- input_umap_df2[row.names(input_umap_df2) %in% row.names(new_clus1_df),]
+sample_tiny_umap3 <- umap(input_umap_df3, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 100000,init = "random")
+```
+
+### b. brackets
+```{r}
+color_bracket_col3 <- row.names(sample_tiny_umap3)
+
+# Swap sample names for same color brackets used in heatmap
+case_and_hc_motif_df      <- rbind(df_annot_bar_case_motif,df_annot_bar_hc_motif)
+bracket_conv_list        <- case_and_hc_motif_df$color_bracket
+names(bracket_conv_list) <- case_and_hc_motif_df$sample_fc
+bracket_conv_list        <- as.list(bracket_conv_list)
+
+
+for (i in 1:length(color_bracket_col3)) {
+  curr_val <- color_bracket_col3[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col3[i] <- val_bracket
+}
+
+# Make manual color grad
+uni_brackets_umap3 <- unique(color_bracket_col3)
+bar_colors_umap3   <- c()
+for (bracket in as.numeric(uni_brackets_umap3)) {
+  bar_colors_umap3 <- c(bar_colors_umap3,color_list[bracket])
+}
+names(bar_colors_umap3) <- uni_brackets_umap3
+```
+
+
+### c. Plot - PDF
+```{r,fig.height=5,fig.width=9}
+# original umap_plot1
+umap_reclus_clus1 <- tibble(x = sample_tiny_umap3[,1],y = sample_tiny_umap3[,2],sample = color_bracket_col3) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=1) + scale_color_manual(values = bar_colors_umap3) + label_theme_umap_v2 + geom_hline(yintercept= -0.3, linetype="dashed", color = "red")
+
+# Plot panel
+plot_umap_clus1_panel <- plot_grid(umap_reclus,umap_reclus_clus1,ncol = 2)
+
+plot_umap_reclus_panel_fh <- file.path(PLOT_DIR_QC,"umap_panel_clus1_sub_clustering.pdf")
+pdf(file = plot_umap_reclus_panel_fh,height = 5,width = 9)
+plot_umap_clus1_panel
+dev.off()
+```
+
+# 14. Re-define cluster 1 and 2
+```{r}
+new_clus1_df_sub1 <- sample_tiny_umap3[sample_tiny_umap3[,2] > -0.3,] # cluster 1
+new_clus1_df_sub2 <- sample_tiny_umap3[sample_tiny_umap3[,2] < -0.3,]
+```
+
+
+# -------------------------------------
+
+# FINAL CLUSTER MASTER TABLE (SAMPLE LEVEL)
+
+# 1. combine all sum RPK columns
+```{r}
+formatSumRPKdf <- function(sum_rpk_df,colname) {
+  sample_order          <- sum_rpk_df$sample_fc
+  sum_rpk_df            <- as.data.frame(sum_rpk_df[,"sum_rpk"])
+  row.names(sum_rpk_df) <- sample_order
+  names(sum_rpk_df)     <- colname
+  
+  return(sum_rpk_df)
+}
+
+master_sum_all <- formatSumRPKdf(all_sum_rpk2,colname = "sumRPK_all_pairseq_hits")
+master_sum_motif <- formatSumRPKdf(all_motif_sum_rpk2,colname = "sumRPK_motif_peps")
+master_sum_target <- formatSumRPKdf(all_target_sum_rpk2,colname = "sumRPK_target_peps")
+
+master_sample_cluster_table <- cbind(master_sum_all,master_sum_target,master_sum_motif)
+
+# add sample and study id columns
+master_sample_cluster_table$sample_fc <- row.names(master_sample_cluster_table)
+master_sample_cluster_table$studyid   <- tstrsplit(master_sample_cluster_table$sample_fc,"_")[[1]]
+
+# re-order 
+master_sample_cluster_table <- master_sample_cluster_table[,c("studyid","sample_fc","sumRPK_all_pairseq_hits","sumRPK_target_peps","sumRPK_motif_peps")]
+```
+
+# 2. Add in previous cluster assignments
+```{r}
+master_sample_cluster_table$sample <- str_replace_all(master_sample_cluster_table$sample_fc,"_FC","")
+
+# original cluster 1
+clus_col1 <- master_sample_cluster_table$sample
+clus_col1[clus_col1 %in% cluster1_metadata$sample] <- "cluster1"
+clus_col1[! clus_col1 %in% "cluster1"] <- ""
+master_sample_cluster_table$cluster_manual <- clus_col1
+```
+
+# 3. Add col Fig 1a UMAP
+```{r}
+clus_col3 <- master_sample_cluster_table$sample_fc
+clus_col3[clus_col3 %in% row.names(subset_umap_fig1)] <- "cluster1"
+clus_col3[! clus_col3 %in% "cluster1"] <- ""
+master_sample_cluster_table$cluster_umap_fig1a <- clus_col3
+```
+
+# 4. Updated cluster assignments
+```{r}
+new_clus1_samples <- row.names(new_clus1_df_sub1)
+new_clus2_samples <- row.names(new_clus1_df_sub2)
+new_clus3_samples <- row.names(new_clus3_df)
+
+clus_col4 <- master_sample_cluster_table$sample_fc
+clus_col4[clus_col4 %in% new_clus1_samples] <- "cluster1"
+clus_col4[clus_col4 %in% new_clus2_samples] <- "cluster2"
+clus_col4[clus_col4 %in% new_clus3_samples] <- "cluster3"
+
+master_sample_cluster_table$cluster_final <- clus_col4
+```
+
+# ---
+
+# Create sum RPK df across all input samples
+
+# 1. combine all sum RPK columns
+```{r}
+df_sum_all <- formatSumRPKdf(all_sum_rpk,colname = "sumRPK_all_pairseq_hits")
+df_sum_motif <- formatSumRPKdf(all_motif_sum_rpk,colname = "sumRPK_motif_peps")
+df_sum_target <- formatSumRPKdf(all_target_sum_rpk,colname = "sumRPK_target_peps")
+
+all_sample_cluster_table <- cbind(df_sum_all,df_sum_target,df_sum_motif)
+
+# add sample and study id columns
+all_sample_cluster_table$sample_fc <- row.names(all_sample_cluster_table)
+all_sample_cluster_table$studyid   <- tstrsplit(all_sample_cluster_table$sample_fc,"_")[[1]]
+
+# re-order 
+all_sample_cluster_table <- all_sample_cluster_table[,c("studyid","sample_fc","sumRPK_all_pairseq_hits","sumRPK_target_peps","sumRPK_motif_peps")]
+```
+
+# 2. Add in Gavins cluster assignments
+```{r}
+all_sample_cluster_table$sample <- str_replace_all(all_sample_cluster_table$sample_fc,"_FC","")
+
+# Gavins original cluster 1
+clus_col1 <- all_sample_cluster_table$sample
+clus_col1[clus_col1 %in% cluster1_metadata$sample] <- "cluster1"
+clus_col1[! clus_col1 %in% "cluster1"] <- ""
+all_sample_cluster_table$cluster_manual <- clus_col1
+```
+
+# 3. Add col Fig 1a UMAP
+```{r}
+clus_col3 <- all_sample_cluster_table$sample_fc
+clus_col3[clus_col3 %in% row.names(subset_umap_fig1)] <- "cluster1"
+clus_col3[! clus_col3 %in% "cluster1"] <- ""
+all_sample_cluster_table$cluster_umap_fig1a <- clus_col3
+```
+
+# 4. My cluster assignments
+```{r}
+new_clus1_samples <- row.names(new_clus1_df_sub1)
+new_clus2_samples <- row.names(new_clus1_df_sub2)
+new_clus3_samples <- row.names(new_clus3_df)
+
+clus_col4 <- all_sample_cluster_table$sample_fc
+clus_col4[clus_col4 %in% new_clus1_samples] <- "cluster1"
+clus_col4[clus_col4 %in% new_clus2_samples] <- "cluster2"
+clus_col4[clus_col4 %in% new_clus3_samples] <- "cluster3"
+clus_col4[! clus_col4 %in% c("cluster1","cluster2","cluster3")] <- ""
+
+all_sample_cluster_table$cluster_final <- clus_col4
+```
+
+
+
+# ---
+
+# 1. Pick peptides to cluster
+```{r}
+pep_sum_rpk_df_qc <- pep_sum_rpk_df[pep_sum_rpk_df$sum_rpk_all > 800,]
+pep_sum_rpk_df_qc <- pep_sum_rpk_df_qc[pep_sum_rpk_df_qc$ratio_case_hc > 4,]
+target_enriched_peptides_qc <- row.names(pep_sum_rpk_df_qc)
+```
+
+
+# 2. PLOT heatmaps cluster 1/2/3
+
+### a. list all cluster samples
+```{r}
+# Cluster 1 and 2
+master_cluster1 <- master_sample_cluster_table[master_sample_cluster_table$cluster_final %in% c("cluster1"),]
+master_cluster2 <- master_sample_cluster_table[master_sample_cluster_table$cluster_final %in% c("cluster2"),]
+master_cluster3 <- master_sample_cluster_table[master_sample_cluster_table$cluster_final %in% c("cluster3"),]
+
+master_cluster1_fc <- master_cluster1$sample_fc
+master_cluster2_fc <- master_cluster2$sample_fc
+master_cluster3_fc <- master_cluster3$sample_fc
+```
+
+
+### b. re-cluster
+```{r}
+# Keep only target peptides
+tiny_logfc_qc <- tiny_logfc[row.names(tiny_logfc) %in% target_enriched_peptides_qc,]
+
+# Cluster Pre and post separately (KEEP)
+samples_to_cluster1 <- names(tiny_logfc_qc)[names(tiny_logfc_qc) %in% master_cluster1_fc]
+samples_to_cluster2 <- names(tiny_logfc_qc)[names(tiny_logfc_qc) %in% master_cluster2_fc]
+samples_to_cluster3 <- names(tiny_logfc_qc)[names(tiny_logfc_qc) %in% master_cluster3_fc]
+tiny_logfc_c1     <- tiny_logfc_qc[,names(tiny_logfc_qc) %in% samples_to_cluster1]
+tiny_logfc_c2     <- tiny_logfc_qc[,names(tiny_logfc_qc) %in% samples_to_cluster2]
+tiny_logfc_c3     <- tiny_logfc_qc[,names(tiny_logfc_qc) %in% samples_to_cluster3]
+
+ordered_samples_c1       <- getGroupSampleOrderHeatmap(tiny_logfc_qc, samples_to_cluster1)
+ordered_samples_c2       <- getGroupSampleOrderHeatmap(tiny_logfc_qc, samples_to_cluster2)
+ordered_samples_c3       <- getGroupSampleOrderHeatmap(tiny_logfc_qc, samples_to_cluster3)
+
+peptides_order_samples_qc <- getGroupPeptideOrderHeatmap(plot_df = tiny_logfc_qc,
+                                                         select_samples = c(samples_to_cluster1,samples_to_cluster2,samples_to_cluster3),
+                                                         select_peptides = row.names(tiny_logfc_qc))
+```
+
+### c. re-make ordered heatmap dfs
+```{r}
+# Re-order peptides
+tiny_logfc_qc <- tiny_logfc_qc[peptides_order_samples_qc,]
+
+tiny_logfc_qc_c1 <- tiny_logfc_qc[,ordered_samples_c1]
+tiny_logfc_qc_c2 <- tiny_logfc_qc[,ordered_samples_c2]
+tiny_logfc_qc_c3 <- tiny_logfc_qc[,ordered_samples_c3]
+
+df_logfc_c1     <- formatPepHeatmapForGGPLOT(heatmap_input = tiny_logfc_qc_c1)
+df_logfc_c2     <- formatPepHeatmapForGGPLOT(heatmap_input = tiny_logfc_qc_c2)
+df_logfc_c3     <- formatPepHeatmapForGGPLOT(heatmap_input = tiny_logfc_qc_c3)
+```
+
+### d. PLOT Heatmaps
+
+### --theme
+```{r}
+label_theme_heatmap_ggplot_v2 <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+```
+
+```{r}
+plot_heatmap_c1 <- ggplot(df_logfc_c1, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_v2
+
+plot_heatmap_c2 <- ggplot(df_logfc_c2, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+
+plot_heatmap_c3 <- ggplot(df_logfc_c3, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+```
+
+# 3. Re-plot barplots
+
+### a. subset and re-level
+```{r}
+all_motif_sum_rpk_c1   <- all_motif_sum_rpk[all_motif_sum_rpk$sample_fc %in% ordered_samples_c1,]
+all_motif_sum_rpk_c2   <- all_motif_sum_rpk[all_motif_sum_rpk$sample_fc %in% ordered_samples_c2,]
+all_motif_sum_rpk_c3   <- all_motif_sum_rpk[all_motif_sum_rpk$sample_fc %in% ordered_samples_c3,]
+
+all_motif_sum_rpk_c1$sample_fc <- factor(all_motif_sum_rpk_c1$sample_fc,levels = ordered_samples_c1)
+all_motif_sum_rpk_c2$sample_fc <- factor(all_motif_sum_rpk_c2$sample_fc,levels = ordered_samples_c2)
+all_motif_sum_rpk_c3$sample_fc <- factor(all_motif_sum_rpk_c3$sample_fc,levels = ordered_samples_c3)
+```
+
+### b. re-plot barplots
+```{r,fig.height=3,fig.width=14}
+# motif peptides
+bar_sumrpk_motif_c1 <-ggplot(data=all_motif_sum_rpk_c1, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+bar_sumrpk_motif_c2 <-ggplot(data=all_motif_sum_rpk_c2, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+bar_sumrpk_motif_c3 <-ggplot(data=all_motif_sum_rpk_c3, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+```
+
+
+# 4. PLOT PANEL
+
+### a. indiv. clusters
+```{r,fig.height=7,fig.width=6}
+clus1_panel <- plot_grid(bar_sumrpk_motif_c1,plot_heatmap_c1,ncol = 1,align = "v",rel_heights = c(2,5))
+clus2_panel <- plot_grid(bar_sumrpk_motif_c2,plot_heatmap_c2,ncol = 1,align = "v",rel_heights = c(2,5))
+clus3_panel <- plot_grid(bar_sumrpk_motif_c3,plot_heatmap_c3,ncol = 1,align = "v",rel_heights = c(2,5))
+```
+
+### b. full panel
+```{r,fig.height=7,fig.height=13}
+all_clus_panel <- plot_grid(clus1_panel,clus2_panel,clus3_panel,ncol = 3,align = "h",rel_widths = c(5,4,4))
+```
+
+# -------------------------------------
+
+# Write master cluster metadata table
+```{r}
+output_table_fh <- "resources/MASTER_cluster1_metadata.csv"
+write.csv(master_sample_cluster_table,file = output_table_fh,quote = F,row.names = F)
+```
+
+# Write Extended master table with all samples
+```{r}
+output_table_all_fh <- "resources/MASTER_all_samples_metadata.csv"
+write.csv(all_sample_cluster_table,file = output_table_all_fh,quote = F,row.names = F)
+```

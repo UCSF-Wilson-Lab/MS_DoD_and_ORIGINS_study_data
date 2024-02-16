@@ -1,0 +1,3161 @@
+---
+title: "Figures - DoD and ORIGINS"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+library(gplots)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(png)
+library(ggplot2)
+library(cowplot)
+library(ggrepel)
+library(plotly)
+library(uwot)
+library(gridExtra)
+library(seqinr)
+library(DECIPHER)
+library(Biostrings)
+library(text.alignment)
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+
+# Patients to omit from ORIGINS figures
+patients_to_omit_fh <- "resources/Patients_to_omit_all_figures.csv"
+omit_df             <- read.csv(patients_to_omit_fh,stringsAsFactors = F)
+
+PLOT_DIR_MAIN  <- "plots"
+TABLE_DIR_MAIN <- "tables"
+```
+
+
+# FUNCTIONS
+```{r}
+# peptide clustering
+getGroupPeptideOrderHeatmap <- function(plot_df,select_samples,select_peptides) {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  plot_df     <- plot_df[row.names(plot_df) %in% select_peptides,]
+  heatmap_mtx <- as.matrix(plot_df)
+  
+  # gene to peptide convertion vec 
+  gene_to_peptide_vec        <- row.names(heatmap_mtx)
+  names(gene_to_peptide_vec) <- tstrsplit(gene_to_peptide_vec,"_")[[1]]
+  
+  
+  # 1 - Heirarchical clustering - all peptides first 
+  d        <- dist(heatmap_mtx)
+  hc       <- hclust(d)
+  hc_peptide_order <- rownames(heatmap_mtx)[hc$order]
+  
+  # establish gene order 
+  clustered_gene_order <- unique(tstrsplit(hc_peptide_order,"_")[[1]])
+  
+  final_peptide_order <- c()
+  for (gene in clustered_gene_order) {
+    target_peps <- as.character(gene_to_peptide_vec[names(gene_to_peptide_vec) %in% gene])
+    
+    if(length(target_peps) == 1){
+      final_peptide_order <- c(final_peptide_order,target_peps)
+    } else{
+      cat(paste0(gene, "\n"))
+      gene_mtx <- heatmap_mtx[row.names(heatmap_mtx) %in% target_peps,]
+      d        <- dist(gene_mtx)
+      hc       <- hclust(d)
+      gene_pep_order <- rownames(gene_mtx)[hc$order]
+      final_peptide_order <- c(final_peptide_order,gene_pep_order)
+    }
+  }
+  
+  return(final_peptide_order)
+}
+
+
+# sample clustering
+getGroupSampleOrderHeatmap <- function(plot_df,select_samples,select_peptides = NULL) {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  if(!is.null(select_peptides)){
+    plot_df <- plot_df[row.names(plot_df) %in% select_peptides,]
+  }
+  heatmap_mtx <- t(as.matrix(plot_df))
+  
+  # Heirarchical clustering 
+  d        <- dist(heatmap_mtx)
+  hc       <- hclust(d)
+  hc_sample_order <- rownames(heatmap_mtx)[hc$order]
+  
+  return(hc_sample_order)
+}
+
+
+# sample clustering (Pre and Post matched)
+getGroupSampleOrderHeatmapPrePost <- function(plot_df,select_samples,select_peptides = NULL,
+                                              regex_pre = "_pre_", regex_post = "_post_") {
+  # Get matrix of sample subset
+  plot_df     <- plot_df[,names(plot_df) %in% select_samples]
+  if(!is.null(select_peptides)){
+    plot_df <- plot_df[row.names(plot_df) %in% select_peptides,]
+  }
+  heatmap_mtx <- t(as.matrix(plot_df))
+  
+  # Create pre and post sample vectors
+  pre_samples         <- rownames(heatmap_mtx)[grep(regex_pre,rownames(heatmap_mtx))]
+  names(pre_samples)  <- tstrsplit(pre_samples,"_")[[1]]
+  post_samples        <- rownames(heatmap_mtx)[grep(regex_post,rownames(heatmap_mtx))]
+  names(post_samples) <- tstrsplit(post_samples,"_")[[1]]
+  
+  # Heirarchical clustering - Pre
+  pre_mtx  <- heatmap_mtx[rownames(heatmap_mtx) %in% pre_samples,]
+  d        <- dist(pre_mtx)
+  hc       <- hclust(d)
+  hc_pre_sample_order <- rownames(pre_mtx)[hc$order]
+  
+  # Final pre post order
+  final_sample_order <- c()
+  for (pre in hc_pre_sample_order) {
+    pt   <- tstrsplit(pre,"_")[[1]]
+    post <- as.character(post_samples[names(post_samples) %in% pt])
+    final_sample_order <- c(final_sample_order,pre,post)
+  }
+  
+  return(final_sample_order)
+}
+
+# formatHeatmapForGGPLOT
+# - format heatmap data frame for ggplot2
+# - columns = samples, rows = peptides
+formatPepHeatmapForGGPLOT <- function(heatmap_input) {
+  heatmap_input <- as.data.frame(heatmap_input)
+  
+  createEntry <- function(pep,heatmap_input) {
+    col_names_plot <- c("peptide","sample","value")
+    entry <- data.frame(matrix(nrow = ncol(heatmap_input),ncol = 3))
+    names(entry) <- col_names_plot
+    
+    subset_heatmap <- heatmap_input[pep,]
+    samples        <- names(heatmap_input)
+
+    # Fill entry
+    entry$peptide <- pep
+    entry$sample  <- samples
+    entry$value   <- as.numeric(subset_heatmap[pep,])
+    
+    return(entry)
+  }
+  
+  
+  pep_list <- as.list(rownames(heatmap_input))
+  entry_df_list <- lapply(pep_list, createEntry,heatmap_input=heatmap_input)
+  plot_df       <- do.call(rbind,entry_df_list)
+  
+  
+  plot_df$peptide <- factor(plot_df$peptide,levels = row.names(heatmap_input))
+  plot_df$sample  <- factor(plot_df$sample,levels = names(heatmap_input))
+  
+  return(plot_df)
+}
+
+
+# createPepEnrichStatusDataFrame
+# - creates binary hit data frame
+# - This should only be used on full processed candidate data frame to establish 
+#   which peptides are enriched in each sample
+# - df.type = c("peptide","gene")
+createPepEnrichStatusDataFrameDoD <- function(pep_df,list_of_samples, MIN_RPK = 0,FC_THRESH1 = 10, FC_THRESH2 = 100, SUM_RPK_THRESH = 50, 
+                                           ZSCORE_THRESH1 = 0,ZSCORE_THRESH2 = 0,
+                                           peptide.id.col = "peptide_id", gene.col = "gene",df.type = "peptide"){
+  
+  
+  binary_df            <- as.data.frame(matrix(0,nrow = nrow(pep_df),ncol = length(list_of_samples)))
+  if(df.type == "peptide"){row.names(binary_df) <- pep_df[,peptide.id.col]}
+  if(df.type == "gene")   {row.names(binary_df) <- pep_df[,gene.col]}
+  names(binary_df)     <- list_of_samples
+  
+  
+  for(samp in list_of_samples){
+    candidate_peptides <- c()
+    
+    samp_fc <- paste0(samp,"_FC")
+    samp_z  <- paste0(samp,"_Z")
+    
+    #create sample-specific dataframe of minimum rpK >= 2,  minimum FC >= 10 and minium Z-score threshold
+    df_2rpK      <- subset(pep_df, pep_df[,samp] >= MIN_RPK)
+    if(ZSCORE_THRESH1 != 0){
+      df_2rpk      <- subset(df_2rpK, df_2rpK[,samp_z] >= ZSCORE_THRESH1)
+    }
+    df_2rpK_FC10 <- subset(df_2rpK, df_2rpK[,samp_fc] >= FC_THRESH1)
+    
+    #create separate sample-specific dataframe of minimum rpK >= 2 and minimum FC >= 100
+    df_2rpK_FC10_FC100 <- subset(df_2rpK_FC10, df_2rpK_FC10[,samp_fc] >= FC_THRESH2)
+    if(ZSCORE_THRESH2 != 0){
+      df_2rpK_FC10_FC100 <- df_2rpK_FC10_FC100[df_2rpK_FC10_FC100[,samp_z] >= ZSCORE_THRESH2,]
+    }
+    
+    #expand FC100 dataframe to include FC >= 10 phage that mapt to same genes as FC >= 100 phage (goal to identifying overlapping, enriched phage)
+    df_extended <- df_2rpK_FC10[which(df_2rpK_FC10$gene %in% df_2rpK_FC10_FC100$gene),]
+    
+    #create unique list of genes in the expanded df
+    genes <- unique(df_extended$gene)
+    
+    if (df.type == "peptide"){
+      #filter out genes whose summed rpK < 50
+      for(gene in genes){
+        df_get_50rpK <- df_extended[df_extended$gene %in% gene,]
+        
+        # Verify that sum RPK of genes meets threshold
+        if (sum(df_get_50rpK[,samp]) >= SUM_RPK_THRESH){
+          # Verify at least one peptide has a FC greater than the 2nd threshold
+          if (nrow(df_get_50rpK) >= 1){
+            peptide_fc_vec <- df_get_50rpK[,samp_fc]
+            sig_fc         <- peptide_fc_vec[peptide_fc_vec > FC_THRESH2]
+            if (ZSCORE_THRESH2 != 0){
+              peptide_fc_vec <- df_get_50rpK[,samp_z]
+              sig_fc         <- peptide_fc_vec[peptide_fc_vec >= ZSCORE_THRESH2]
+            }
+            
+            ## Significant peptide candidates
+            if (length(sig_fc) > 0){
+              # Store peptide IDs
+              candidate_peptides <- c(candidate_peptides,unique(df_get_50rpK$peptide_id))
+            }
+          }
+          
+        }else{
+          next
+        }
+      }
+      
+      # Add sample results to binary data frame
+      binary_df[row.names(binary_df) %in% candidate_peptides,samp] <- 1
+    }
+    
+    if (df.type == "gene"){
+      if (length(df_extended$gene) > 0){
+        binary_df[row.names(binary_df) %in% df_extended$gene,samp] <- 1
+      }
+    }
+    
+    
+  }
+  
+  return(binary_df)
+}
+
+```
+
+
+# -------------------------------------
+
+# FIGURE 1 - DOD
+
+# 1. load objects and metadata
+```{r}
+obj_fh1 <- "objects/Fig1_Obj.RData"
+load(obj_fh1)
+
+# Cluster 1 metadata
+cluster1_metadata_fh    <- "resources/cluster1_metadata_manually_identified_clusters.csv"
+cluster1_list_fh        <- "resources/manually_identified_clusters.csv"
+master_cluster_table_fh <- "resources/MASTER_cluster1_metadata.csv"
+
+# Load original cluster 1 metadata
+cluster1_metadata    <- read.csv(cluster1_metadata_fh, stringsAsFactors = F)
+cluster1_list_df     <- read.csv(cluster1_list_fh, stringsAsFactors = F)
+cluster1_list_df     <- cluster1_list_df[cluster1_list_df$cluster %in% c("cluster1"),]
+# Load updated table
+master_cluster_table <- read.csv(master_cluster_table_fh,stringsAsFactors = F)
+master_cluster1_df   <- master_cluster_table[master_cluster_table$cluster_final %in% "cluster1",]
+master_cluster1_df   <- master_cluster1_df[master_cluster1_df$cluster_umap_fig1a %in% "cluster1",] 
+master_cluster2_df   <- master_cluster_table[master_cluster_table$cluster_final %in% "cluster2",]
+
+cluster1_ids_updated <- unique(master_cluster1_df$studyid)
+cluster2_ids         <- unique(master_cluster2_df$studyid)
+```
+
+
+# 2. sample group lists (vectors)
+
+### a. sample names
+```{r}
+### All columns
+gfap_cols <- all_names[grep("gfap",all_names)]
+bead_cols <- all_names[grep("bead",all_names)]
+
+healthy_cols      <- all_names[grep("healthy",all_names)]
+healthy_pre_cols  <- healthy_cols[grep("pre", healthy_cols)]
+healthy_post_cols <- healthy_cols[grep("post", healthy_cols)]  
+
+case_pre_cols  <- all_names[grep("Case_pre",all_names)]
+case_post_cols <- all_names[grep("Case_post",all_names)]
+
+tbi_cols <- all_names[grep("TBI",all_names)]
+mig_cols <- all_names[grep("Migraine",all_names)]
+
+epic_csf_cols   <- all_names[grep("_csf",all_names)]
+epic_serum_cols <- all_names[grep("_serum",all_names)]
+```
+
+
+### b. FC/Z sample names
+```{r}
+gfap_fc_cols <- fc_names[grep("gfap",fc_names)]
+gfap_z_cols  <- str_replace_all(gfap_fc_cols, "_FC","_Z")
+
+healthy_fc_cols <- fc_names[grep("healthy",fc_names)]
+healthy_z_cols  <- str_replace_all(healthy_fc_cols, "_FC","_Z")
+
+healthy_pre_fc_cols <- healthy_fc_cols[grep("pre",healthy_fc_cols)]
+healthy_pre_z_cols  <- str_replace_all(healthy_pre_fc_cols, "_FC","_Z")
+
+healthy_post_fc_cols <- healthy_fc_cols[grep("post",healthy_fc_cols)]
+healthy_post_z_cols  <- str_replace_all(healthy_post_fc_cols, "_FC","_Z")
+
+case_pre_fc_cols <- fc_names[grep("Case_pre",fc_names)]
+case_pre_z_cols  <- str_replace_all(case_pre_fc_cols, "_FC","_Z")
+
+case_post_fc_cols <- fc_names[grep("Case_post",fc_names)]
+case_post_z_cols  <- str_replace_all(case_post_fc_cols, "_FC","_Z")
+
+tbi_fc_cols <- fc_names[grep("TBI",fc_names)]
+tbi_z_cols  <- str_replace_all(tbi_fc_cols, "_FC","_Z")
+
+mig_fc_cols <- fc_names[grep("Migraine",fc_names)]
+mig_z_cols  <- str_replace_all(mig_fc_cols, "_FC","_Z")
+
+epic_fc_csf_cols <- fc_names[grep("_csf",fc_names)]
+epic_z_csf_cols  <- str_replace_all(epic_fc_csf_cols, "_FC","_Z")
+
+epic_fc_serum_cols <- fc_names[grep("_serum",fc_names)]
+epic_z_serum_cols  <- str_replace_all(epic_fc_serum_cols, "_FC","_Z")
+
+bead_fc_cols <- paste0(bead_cols, "_FC")
+bead_z_cols  <- str_replace_all(bead_fc_cols, "_FC","_Z")
+```
+
+# 3. Re-generate top_candidates df
+```{r}
+# Filter large data frame
+THRESH_ROWSUM1 = 10
+THRESH_ROWSUM2 = 15
+
+tinydf <- candidate_df_exp_fin[c("peptide_id", case_pre_fc_cols, case_post_fc_cols, healthy_cols)]
+tinydf <- tinydf %>% mutate(count_rich = rowSums(tinydf[, case_post_fc_cols[1:243]] > THRESH_ROWSUM1))
+tinydf <- tinydf %>% filter(count_rich > THRESH_ROWSUM2)
+
+# Format top candidates df
+top_peptides   <- as.vector(tinydf$peptide_id)
+top_candidates <- candidate_df_exp_fin %>% filter(peptide_id %in% top_peptides)
+top_candidates <- arrange(top_candidates, gene)
+
+# meta data for top candidates
+top_pep_meta <- top_candidates[, c("peptide_id", "gene")]
+peptide_id <- top_pep_meta$peptide_id
+top_pep_meta <- top_pep_meta[-1]
+rownames(top_pep_meta) <- peptide_id
+```
+
+
+# 4. Setup Log FC data frame
+
+### a. Log10
+```{r}
+tiny_logfc <- top_candidates[c("peptide_id", case_pre_fc_cols, case_post_fc_cols, healthy_pre_fc_cols, healthy_post_fc_cols )]
+
+peptide    <- tiny_logfc[, 1]
+tiny_logfc <- tiny_logfc[, -1]
+
+rownames(tiny_logfc) <- peptide
+tiny_logfc[tiny_logfc == 0] <- 1
+tiny_logfc <- log10(tiny_logfc)
+
+# Metadata columns (make compatible with filtered 'top_candidates')
+plot_samples    <- names(tiny_logfc)
+fc_metadata_sub <- fc_metadata[row.names(fc_metadata) %in% plot_samples,]
+fc_metadata_sub <- fc_metadata_sub[plot_samples,]
+```
+
+
+# 5. UMAP - log10 FC
+
+### a. Run UMAP
+```{r,fig.height=5,fig.width=6}
+set.seed(123456)
+
+input_umap_df <- as.data.frame(t(tiny_logfc))
+sample_tiny_umap <- umap(input_umap_df, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 100000,init = "random")
+```
+
+
+# 6. Cluster 1 Heatmap (Log10 FC)
+
+### a. establish heatmap groups
+```{r}
+cols_heatmap        <- names(tiny_logfc)
+names(cols_heatmap) <- tstrsplit(cols_heatmap,"_")[[1]]
+
+# MS - cluster 1 and remaining (pre/post)
+ms_cols       <- cols_heatmap[grep("_Case_",cols_heatmap)]
+
+clus1_ms_cols    <- as.character(ms_cols[names(ms_cols) %in% cluster1_ids_updated])
+clus2_ms_cols    <- as.character(ms_cols[names(ms_cols) %in% cluster2_ids])
+
+rem_ms_cols      <- as.character(ms_cols[! ms_cols %in% c(clus1_ms_cols,clus2_ms_cols)])
+rem_ms_cols_pre  <- rem_ms_cols[grep("_pre_",rem_ms_cols)]
+rem_ms_cols_post <- rem_ms_cols[grep("_post_",rem_ms_cols)]
+
+# Healthy (pre-post)
+healthy_cols      <- as.character(cols_heatmap[grep("_healthy_control_",cols_heatmap)])
+healthy_cols_pre  <- healthy_cols[grep("_pre_",healthy_cols)]
+healthy_cols_post <- healthy_cols[grep("_post_",healthy_cols)]
+```
+
+### b. cluster 1 only binary dfs
+```{r}
+tiny_logfc_clus1 <- tiny_logfc[,names(tiny_logfc) %in% clus1_ms_cols]
+
+# create Binary df
+binary_logfc_clus1 <- tiny_logfc_clus1
+binary_logfc_clus1[binary_logfc_clus1 > 0] <- 1
+binary_logfc_clus1[binary_logfc_clus1 < 1] <- 0
+
+pt_hits_df <- as.data.frame(rowSums(binary_logfc_clus1))
+names(pt_hits_df) <- "total_pt_hits"
+pt_hits_df$peptides <- row.names(pt_hits_df)
+pt_hits_df$gene     <- tstrsplit(pt_hits_df$peptides,"_")[[1]]
+pt_hits_df_top      <- pt_hits_df[pt_hits_df$total_pt_hits >=9,]
+
+# clus 1 subset
+fc_metadata_clus1 <- fc_metadata_sub[row.names(fc_metadata_sub) %in% clus1_ms_cols,]
+tiny_logfc_clus1 <- tiny_logfc_clus1[row.names(tiny_logfc_clus1) %in% pt_hits_df_top$peptides,]
+```
+
+
+### c. cluster 2 only
+```{r}
+tiny_logfc_clus2 <- tiny_logfc[,names(tiny_logfc) %in% clus2_ms_cols]
+
+# clus 2 subset
+fc_metadata_clus2 <- fc_metadata_sub[row.names(fc_metadata_sub) %in% clus2_ms_cols,]
+tiny_logfc_clus2 <- tiny_logfc_clus2[row.names(tiny_logfc_clus2) %in% pt_hits_df_top$peptides,]
+```
+
+
+# 7. Make Fig 1b Heatmap
+
+### a. make input dataframes - pre clustering
+```{r}
+# Keep ~100 peptides from top hits
+pt_hits_df_fig1a <- pt_hits_df[pt_hits_df$total_pt_hits >= 4,]
+pt_hits_df_fig1  <- pt_hits_df[pt_hits_df$total_pt_hits >= 9,]
+
+#input_df <- tiny_logfc
+input_df <- tiny_logfc
+
+# Cluster 1 only (case and matched controls)
+clus1_pt_list <- unique(tstrsplit(clus1_ms_cols,"X_")[[1]])
+
+clus1_matched_controls <- c()
+for (pt in clus1_pt_list) {
+  all_pt_samples <- names(input_df)[grep(pt,names(input_df))]
+  hc_pt_samples  <- all_pt_samples[grep("A_healthy",all_pt_samples)] 
+  clus1_matched_controls <- c(clus1_matched_controls,hc_pt_samples)
+}
+
+# Find matched HC
+full_logfc_clus1  <- input_df[,names(input_df) %in% c(clus1_ms_cols,clus1_matched_controls)]
+# Fix metadata
+fc_metadata_clus1 <- fc_metadata_sub[row.names(fc_metadata_sub) %in% c(clus1_ms_cols,clus1_matched_controls),]
+```
+
+
+### b. cluster 1 - with more peptides
+
+#### --PDF - Fig 1b
+```{r,fig.height=5,fig.width=14}
+# re-order matrix
+full_clus1_peptides_order <- getGroupPeptideOrderHeatmap(plot_df = full_logfc_clus1,
+                                                         select_samples = c(clus1_ms_cols,clus1_matched_controls),
+                                                         select_peptides = pt_hits_df_fig1$peptides)
+full_clus1_peptides_order_fig1a <- getGroupPeptideOrderHeatmap(plot_df = full_logfc_clus1,
+                                                         select_samples = c(clus1_ms_cols,clus1_matched_controls),
+                                                         select_peptides = pt_hits_df_fig1a$peptides)
+full_clus1_sample_order   <- getGroupSampleOrderHeatmapPrePost(plot_df = full_logfc_clus1,
+                                                               select_samples = clus1_ms_cols,
+                                                               select_peptides = pt_hits_df_fig1$peptides)
+full_clus1_sample_order_fig1a   <- getGroupSampleOrderHeatmap(plot_df = full_logfc_clus1,
+                                                               select_samples = clus1_ms_cols,
+                                                               select_peptides = pt_hits_df_fig1a$peptides)
+
+# Set up matched HC sample order
+full_clus1_hc_matched_sample_order <- full_clus1_sample_order
+full_clus1_hc_matched_sample_order <- str_replace_all(full_clus1_hc_matched_sample_order,"X_Case_pre_FC","A_healthy_control_pre_FC")
+full_clus1_hc_matched_sample_order <- str_replace_all(full_clus1_hc_matched_sample_order,"X_Case_post_FC","A_healthy_control_post_FC")
+
+full_logfc_clus1_pos <- full_logfc_clus1[full_clus1_peptides_order,c(full_clus1_sample_order,full_clus1_hc_matched_sample_order)]
+
+
+### Re-scale so there are no negative values
+full_logfc_clus1_pos[full_logfc_clus1_pos < 0] <- 0
+fc_metadata_clus1_v2 <- fc_metadata_clus1
+fc_metadata_clus1_v2$type <- NULL
+
+# pheatmap 
+colcolor        <- c("purple","darkgreen")
+names(colcolor) <- c("Case","healthy_control")
+colcolor2        <- c("grey","black")
+names(colcolor2) <- c("pre","post")
+ANNOT_COLORS <- list(collection = colcolor2)
+
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+# Breaks -1 to 4
+break_1 <- seq(-2,1,0.059)  # first 51 breaks
+break_2 <- seq(1,4,0.06)  # last 50 breaks
+break_2 <- break_2[3:length(break_2)]
+break_list1_4 <- c(break_1,break_2)
+# Breaks 0 to 4
+breaks_list0_4 <- seq(0,4,0.0403)
+
+GAPS  <- seq(2,28, by= 2)
+GAPS2 <- seq(30,58, by= 2)
+
+full_clus1_fig1 <- pheatmap(mat = as.matrix(full_logfc_clus1_pos), annotation_col = fc_metadata_clus1_v2, 
+                            color = COLOR_PAL,breaks = break_list1_4,
+                            cluster_rows = F, cluster_cols = F, show_rownames = T,show_colnames = F,
+                            gaps_col = c(GAPS,GAPS2), cellheight = 9,cellwidth = 9,
+                            main = "Cluster 1 Log10 FC",annotation_colors = ANNOT_COLORS,border_color = NA)
+
+plot_fig1b_v2_fh <- file.path(PLOT_DIR_MAIN,"fig1b_dod.pheatmap.pdf")
+pdf(file = plot_fig1b_v2_fh,height = 5,width = 15)
+full_clus1_fig1
+dev.off()
+```
+
+
+# 7.2 Fig 1b Cluster 2
+
+### a. make input dataframes - pre clustering
+```{r}
+input_df <- tiny_logfc
+
+# Cluster 1 only (case and matched controls)
+clus2_pt_list <- unique(tstrsplit(clus2_ms_cols,"X_")[[1]])
+
+clus2_matched_controls <- c()
+for (pt in clus2_pt_list) {
+  all_pt_samples <- names(input_df)[grep(pt,names(input_df))]
+  hc_pt_samples  <- all_pt_samples[grep("A_healthy",all_pt_samples)] 
+  clus2_matched_controls <- c(clus2_matched_controls,hc_pt_samples)
+}
+
+# Find matched HC
+full_logfc_clus2  <- input_df[,names(input_df) %in% c(clus2_ms_cols,clus2_matched_controls)]
+# Fix metadata
+fc_metadata_clus2 <- fc_metadata_sub[row.names(fc_metadata_sub) %in% c(clus2_ms_cols,clus2_matched_controls),]
+```
+
+### b. cluster 2 - with more peptides
+
+#### --PDF - Fig 1b cluster 2
+```{r,fig.height=5,fig.width=14}
+# re-order matrix
+full_clus2_sample_order   <- getGroupSampleOrderHeatmapPrePost(plot_df = full_logfc_clus2,
+                                                               select_samples = clus2_ms_cols,
+                                                               select_peptides = pt_hits_df_fig1$peptides)
+full_clus2_sample_order_fig1a   <- getGroupSampleOrderHeatmap(plot_df = full_logfc_clus2,
+                                                               select_samples = clus2_ms_cols,
+                                                               select_peptides = pt_hits_df_fig1a$peptides)
+
+# Set up matched HC sample order
+full_clus2_hc_matched_sample_order <- full_clus2_sample_order
+full_clus2_hc_matched_sample_order <- str_replace_all(full_clus2_hc_matched_sample_order,"X_Case_pre_FC","A_healthy_control_pre_FC")
+full_clus2_hc_matched_sample_order <- str_replace_all(full_clus2_hc_matched_sample_order,"X_Case_post_FC","A_healthy_control_post_FC")
+
+full_logfc_clus2_pos <- full_logfc_clus2[full_clus1_peptides_order,c(full_clus2_sample_order,full_clus2_hc_matched_sample_order)]
+
+
+### Re-scale so there are no negative values
+full_logfc_clus2_pos[full_logfc_clus2_pos < 0] <- 0
+fc_metadata_clus2_v2 <- fc_metadata_clus2
+fc_metadata_clus2_v2$type <- NULL
+
+# pheatmap
+colcolor        <- c("purple","darkgreen")
+names(colcolor) <- c("Case","healthy_control")
+colcolor2        <- c("grey","black")
+names(colcolor2) <- c("pre","post")
+ANNOT_COLORS <- list(collection = colcolor2)
+
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+# Breaks -1 to 4
+break_1 <- seq(-2,1,0.059)  # first 51 breaks
+break_2 <- seq(1,4,0.06)  # last 50 breaks
+break_2 <- break_2[3:length(break_2)]
+break_list1_4 <- c(break_1,break_2)
+# Breaks 0 to 4
+breaks_list0_4 <- seq(0,4,0.0403)
+
+GAPS  <- seq(2,20, by= 2)
+GAPS2 <- seq(22,42, by= 2)
+
+full_clus2_fig1 <- pheatmap(mat = as.matrix(full_logfc_clus2_pos), annotation_col = fc_metadata_clus2_v2, 
+                            color = COLOR_PAL,breaks = break_list1_4,
+                            cluster_rows = F, cluster_cols = F, show_rownames = T,show_colnames = F,
+                            gaps_col = c(GAPS,GAPS2), cellheight = 9,cellwidth = 9,
+                            main = "Cluster 2 Log10 FC",annotation_colors = ANNOT_COLORS,border_color = NA)
+
+plot_fig1b_clus2_fh <- file.path(PLOT_DIR_MAIN,"fig1b_clus2_dod.pheatmap.pdf")
+pdf(file = plot_fig1b_clus2_fh,height = 5,width = 15)
+full_clus2_fig1
+dev.off()
+```
+
+
+# 8. Fig 1a Full Case/HC heatmaps
+
+### a. Input and cluster cols/rows
+```{r}
+# Full case and HC for large heatmap
+tiny_logfc_plot_all <- input_df[row.names(input_df) %in% pt_hits_df_fig1a$peptides,]
+
+# Get the clustered sample order for all down-sampled groups
+ordered_ms_cluster1_full  <- full_clus1_sample_order_fig1a
+ordered_ms_cluster2_full  <- full_clus2_sample_order_fig1a
+
+# Cluster Pre and post separately
+ordered_ms_pre_full       <- getGroupSampleOrderHeatmap(tiny_logfc_plot_all, c(rem_ms_cols_pre))
+ordered_ms_post_full      <- getGroupSampleOrderHeatmap(tiny_logfc_plot_all, c(rem_ms_cols_post))
+ordered_healthy_pre_full  <- getGroupSampleOrderHeatmap(tiny_logfc_plot_all, c(healthy_cols_pre))
+ordered_healthy_post_full <- getGroupSampleOrderHeatmap(tiny_logfc_plot_all, c(healthy_cols_post))
+
+ordered_plot_cols_full <- c(ordered_ms_cluster1_full,ordered_ms_cluster2_full,ordered_ms_pre_full,ordered_ms_post_full,
+                            ordered_healthy_pre_full,ordered_healthy_post_full)
+
+tiny_logfc_plot_all   <- tiny_logfc_plot_all[,ordered_plot_cols_full]
+
+# Filter metadata
+fc_metadata_fig1      <- fc_metadata_sub[row.names(fc_metadata_sub) %in% names(tiny_logfc_plot_all),]
+```
+
+
+### b. Case and HC heatmaps
+```{r}
+cases_cols   <- c(ordered_ms_cluster1_full,ordered_ms_cluster2_full,ordered_ms_pre_full,ordered_ms_post_full)
+healthy_cols <- c(ordered_healthy_pre_full,ordered_healthy_post_full)
+
+case_logfc_plot_all    <- tiny_logfc_plot_all[,names(tiny_logfc_plot_all) %in% cases_cols,]
+healthy_logfc_plot_all <- tiny_logfc_plot_all[,names(tiny_logfc_plot_all) %in% healthy_cols,]
+
+case_logfc_plot_all[case_logfc_plot_all < 0]       <- 0
+healthy_logfc_plot_all[healthy_logfc_plot_all < 0] <- 0
+
+df_case_logfc_plot     <- formatPepHeatmapForGGPLOT(heatmap_input = case_logfc_plot_all)
+df_healthy_logfc_plot  <- formatPepHeatmapForGGPLOT(heatmap_input = healthy_logfc_plot_all)
+
+
+# HEATMAP commands
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100) 
+
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm")
+EXPAND  = c(0.0,0.0)
+LIMS_ORIG = c(-2, 4)
+LIMS      = c(0, 4.25)
+label_theme_heatmap_ggplot <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.text.y=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+label_theme_heatmap_ggplot_ylab <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.text.y=element_text(size = 5),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+# With color legend
+label_theme_heatmap_ggplot_leg <- theme(panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.text.y=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS,
+                                    legend.position="right")
+
+# CURRENTLY USED
+updated_gradient_cmd <- scale_fill_gradientn(colours = COLOR_PAL,limits = LIMS_ORIG)
+
+# Cases
+plot_case_heatmap <- ggplot(df_case_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+
+# Healthy
+plot_healthy_heatmap <- ggplot(df_healthy_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot
+
+# plot case with color legend
+plot_case_heatmap_v2 <- ggplot(df_case_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_leg
+
+# plot case with peptide IDs
+plot_case_heatmap_v3 <- ggplot(df_case_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_ylab
+```
+
+### c. annotation bars
+
+#### --pre-post status
+```{r}
+COLS                     <- c("sample","value")
+
+# Case
+df_annot_bar_case        <- data.frame(matrix(nrow = ncol(case_logfc_plot_all),ncol = 2))
+names(df_annot_bar_case) <- COLS
+df_annot_bar_case$sample <- names(case_logfc_plot_all)
+df_annot_bar_case$value  <- tstrsplit(names(case_logfc_plot_all),"_")[[3]]
+df_annot_bar_case$value[df_annot_bar_case$value %in% "pre"]  <- 0
+df_annot_bar_case$value[df_annot_bar_case$value %in% "post"] <- 1 
+df_annot_bar_case$value  <- as.numeric(df_annot_bar_case$value)
+df_annot_bar_case$sample <- factor(df_annot_bar_case$sample,levels = names(case_logfc_plot_all))
+
+# Healthy
+df_annot_bar_hc        <- data.frame(matrix(nrow = ncol(healthy_logfc_plot_all),ncol = 2))
+names(df_annot_bar_hc) <- COLS
+df_annot_bar_hc$sample <- names(healthy_logfc_plot_all)
+df_annot_bar_hc$value  <- tstrsplit(names(healthy_logfc_plot_all),"_")[[4]]
+df_annot_bar_hc$value[df_annot_bar_hc$value %in% "pre"]  <- 0
+df_annot_bar_hc$value[df_annot_bar_hc$value %in% "post"] <- 1 
+df_annot_bar_hc$value  <- as.numeric(df_annot_bar_hc$value)
+df_annot_bar_hc$sample <- factor(df_annot_bar_hc$sample,levels = names(healthy_logfc_plot_all))
+
+WIDTH      = 1.0
+MARGINS    = unit(c(0.3, 1, 0.1, 0), "cm") # plot.margin = MARGINS
+EXPAND     = c(0.0,0.0)
+label_theme_bar <- theme(axis.line=element_blank(),
+                          axis.text.y=element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank(),
+                          plot.margin = MARGINS)
+
+# annotation bar
+plot_annot_bar_case <- ggplot(df_annot_bar_case, aes(x = sample, y = value,xmin=0,xmax=length(names(case_logfc_plot_all)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+
+plot_annot_bar_hc <- ggplot(df_annot_bar_hc, aes(x = sample, y = value,xmin=0,xmax=length(names(healthy_logfc_plot_all)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+```
+
+#### --collection group
+```{r}
+# MS
+df_annot_regions_case<- df_annot_bar_case
+df_annot_regions_case$value <- 1
+reg_color_col <- as.character(df_annot_regions_case$sample)
+reg_color_col[reg_color_col %in% ordered_ms_cluster1_full] <- "red"
+reg_color_col[reg_color_col %in% ordered_ms_cluster2_full] <- "green"
+reg_color_col[! reg_color_col %in% c("red","green")]                  <- "purple"
+df_annot_regions_case$color <- reg_color_col
+df_annot_regions_case$color <- factor(df_annot_regions_case$color,levels = c("red","green","purple"))
+
+
+# Healthy
+df_annot_regions_hc <- df_annot_bar_hc
+df_annot_regions_hc$value <- 1
+
+
+# PLOTS
+plot_annot_reg_case <- ggplot(df_annot_regions_case, aes(x = sample, y = value,fill = color,xmin=0,xmax=length(names(case_logfc_plot_all)),ymin=0,ymax=1)) + geom_col(width = WIDTH) + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+
+plot_annot_reg_hc <- ggplot(df_annot_regions_hc, aes(x = sample, y = value,xmin=0,xmax=length(names(case_logfc_plot_all)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "grey") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+
+```
+
+### d. plot panel
+```{r,fig.height=5.3,fig.width=14}
+fig1_full_case    <- plot_grid(plot_annot_bar_case,plot_annot_reg_case,plot_case_heatmap,rel_heights = c(0.4,0.4,4.5),align = "v",ncol = 1)
+fig1_full_healthy <- plot_grid(plot_annot_bar_hc,plot_annot_reg_hc,plot_healthy_heatmap,rel_heights = c(0.4,0.4,4.5),align = "v",ncol = 1)
+
+fig1a_dod <- plot_grid(fig1_full_case,fig1_full_healthy,ncol = 2,rel_widths = c(7,7),align = "h")
+```
+
+
+# ---
+
+# REDO FIG 1a/UMAP
+
+# 1. Load Fig 2 obj
+```{r}
+obj_fh  <- "objects/Fig2_Obj.RData"
+load(obj_fh)
+
+motif_peptides <- consensus_genelist$peptide_id
+```
+
+# 2. Sum RPK barplot
+
+### a. Fig 1a - make input dfs
+```{r}
+case_peps_fig1a <- unique(df_case_logfc_plot$peptide)
+hc_peps_fig1a   <- unique(df_healthy_logfc_plot$peptide)
+
+# Samples
+case_samples_fig1a <- unique(df_case_logfc_plot$sample)
+case_samples_fig1a <- str_replace_all(case_samples_fig1a,"_FC","")
+hc_samples_fig1a   <- unique(df_healthy_logfc_plot$sample)
+hc_samples_fig1a   <- str_replace_all(hc_samples_fig1a,"_FC","")
+
+df_rpk_fig1a <- top_candidates[top_candidates$peptide_id %in% case_peps_fig1a,]
+row.names(df_rpk_fig1a) <- df_rpk_fig1a$peptide_id
+
+fig1b_peptides <- row.names(full_logfc_clus1_pos)
+df_rpk_fig1a   <- df_rpk_fig1a[row.names(df_rpk_fig1a) %in% fig1b_peptides,]
+
+# Case df
+df_rpk_case  <- df_rpk_fig1a[,case_samples_fig1a]
+case_sum_rpk <- as.data.frame(colSums(df_rpk_case))
+names(case_sum_rpk) <- "sum_rpk"
+case_sum_rpk$sample <- row.names(case_sum_rpk)
+case_sum_rpk$sample_fc <- paste(case_sum_rpk$sample,"FC", sep = "_")
+
+# HC df
+df_rpk_hc  <- df_rpk_fig1a[,hc_samples_fig1a]
+hc_sum_rpk <- as.data.frame(colSums(df_rpk_hc))
+names(hc_sum_rpk) <- "sum_rpk"
+hc_sum_rpk$sample <- row.names(hc_sum_rpk)
+hc_sum_rpk$sample_fc <- paste(hc_sum_rpk$sample,"FC", sep = "_")
+
+
+# Change levels based on annot bar
+case_sum_rpk$sample_fc <- factor(case_sum_rpk$sample_fc,levels = levels(df_annot_bar_case$sample))
+hc_sum_rpk$sample_fc <- factor(hc_sum_rpk$sample_fc,levels = levels(df_annot_bar_hc$sample))
+```
+
+
+
+# 2. Sum rpk gradient info
+
+### a. format annot dfs for case and HC
+```{r}
+# cases
+annot_grad <- case_sum_rpk
+annot_grad$scaled_count <- log10(annot_grad$sum_rpk + 1)
+row.names(annot_grad) <- annot_grad$sample_fc
+
+# HC 
+annot_grad_hc <- hc_sum_rpk
+annot_grad_hc$scaled_count <- log10(annot_grad_hc$sum_rpk + 1)
+row.names(annot_grad_hc) <- annot_grad_hc$sample_fc
+```
+
+### b. create manual color gradient
+```{r}
+color_list    <- inferno(100)
+color_list    <- c(color_list,color_list[100])
+numeric_label <- seq(1,101,1)
+count_brackets <- seq(0,4,0.04)
+names(count_brackets) <- numeric_label
+
+# CASE - add numeric annotations to annotation df
+bracket_annot_col <- annot_grad$scaled_count
+for (i in 1:length(bracket_annot_col)) {
+  curr_val <- bracket_annot_col[i]
+  target   <- count_brackets[count_brackets >= curr_val]
+  target   <- target[target == min(target)]
+  bracket  <- names(target)
+  bracket_annot_col[i] <- bracket
+}
+annot_grad$color_bracket <- bracket_annot_col
+
+# HC - add numeric annotations to annotation df
+bracket_annot_hc_col <- annot_grad_hc$scaled_count
+for (i in 1:length(bracket_annot_hc_col)) {
+  curr_val <- bracket_annot_hc_col[i]
+  target   <- count_brackets[count_brackets >= curr_val]
+  target   <- target[target == min(target)]
+  bracket  <- names(target)
+  bracket_annot_hc_col[i] <- bracket
+}
+annot_grad_hc$color_bracket <- bracket_annot_hc_col
+```
+
+### c. add to annot bar dfs
+```{r}
+# CASE
+df_annot_bar_case_motif <- df_annot_bar_case
+row.names(df_annot_bar_case_motif) <- df_annot_bar_case_motif$sample
+df_annot_bar_case_motif <- merge(df_annot_bar_case_motif, annot_grad,by=0,all=T)
+df_annot_bar_case_motif <- df_annot_bar_case_motif[,c("sample_fc","value","sum_rpk","scaled_count","color_bracket")]
+
+# HC
+df_annot_bar_hc_motif <- df_annot_bar_hc
+row.names(df_annot_bar_hc_motif) <- df_annot_bar_hc_motif$sample
+df_annot_bar_hc_motif <- merge(df_annot_bar_hc_motif, annot_grad_hc,by=0,all=T)
+df_annot_bar_hc_motif <- df_annot_bar_hc_motif[,c("sample_fc","value","sum_rpk","scaled_count","color_bracket")]
+```
+
+
+# 3. remake sample annotation bars
+
+### --theme
+```{r}
+WIDTH      = 1.0
+MARGINS    = unit(c(0.3, 1, 0.1, 0), "cm")
+EXPAND     = c(0.0,0.0)
+label_theme_bar <- theme(axis.line=element_blank(),
+                          axis.text.y=element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank(),
+                          plot.margin = MARGINS)
+
+uni_brackets <- unique(df_annot_bar_case_motif$color_bracket)
+bar_colors   <- c()
+for (bracket in as.numeric(uni_brackets)) {
+  bar_colors <- c(bar_colors,color_list[bracket])
+}
+names(bar_colors) <- uni_brackets
+
+# Colors - HC
+uni_brackets_hc <- unique(df_annot_bar_hc_motif$color_bracket)
+bar_colors_hc   <- c()
+for (bracket in as.numeric(uni_brackets_hc)) {
+  bar_colors_hc <- c(bar_colors_hc,color_list[bracket])
+}
+names(bar_colors_hc) <- uni_brackets_hc
+```
+
+
+```{r,fig.height=1,fig.width=7}
+plot_annot_bar_case_motif <- ggplot(df_annot_bar_case_motif, aes(x = sample_fc, y = value,xmin=0,xmax=length(names(case_logfc_plot_all)),ymin=0,ymax=1,fill=color_bracket)) + geom_col(width = WIDTH) + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + scale_fill_manual(values = bar_colors)+ label_theme_bar
+
+plot_annot_bar_hc_motif <- ggplot(df_annot_bar_hc_motif, aes(x = sample_fc, y = value,xmin=0,xmax=length(names(healthy_logfc_plot_all)),ymin=0,ymax=1,fill=color_bracket)) + geom_col(width = WIDTH) + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + scale_fill_manual(values = bar_colors_hc)+ label_theme_bar
+```
+
+
+# 4. Fig 1a - plot bars colored
+
+### --themes
+```{r}
+COLOR_LIMS <- c(0,4)
+sum_rpk_gradient_cmd <- scale_fill_gradientn(colours = color_list,limits = COLOR_LIMS)
+
+BAR_THEME_FIG1<- theme(legend.position="none", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title.x=element_blank(),
+                 axis.text=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_text(size=12),
+                 plot.background = element_blank())
+
+BAR_THEME_FIG1_leg <- theme(legend.position="right", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title.x=element_blank(),
+                 axis.text=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_text(size=12),
+                 plot.background = element_blank())
+```
+
+
+
+```{r,fig.height=3,fig.width=14}
+# No color
+bar_sumrpk_case <-ggplot(data=df_annot_bar_case_motif, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) + BAR_THEME_FIG1
+
+bar_sumrpk_hc <-ggplot(data=df_annot_bar_hc_motif, aes(x=sample_fc, y=sum_rpk)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +BAR_THEME_FIG1
+
+# Colored
+bar_sumrpk_case_colored <-ggplot(data=df_annot_bar_case_motif, aes(x=sample_fc, y=sum_rpk,fill=scaled_count)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) + sum_rpk_gradient_cmd + BAR_THEME_FIG1
+
+bar_sumrpk_hc_colored <-ggplot(data=df_annot_bar_hc_motif, aes(x=sample_fc, y=sum_rpk,fill=scaled_count)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) + sum_rpk_gradient_cmd +BAR_THEME_FIG1
+
+# Make one version with the color legend
+bar_sumrpk_case_colored_v2 <-ggplot(data=df_annot_bar_case_motif, aes(x=sample_fc, y=sum_rpk,fill=scaled_count)) +
+  geom_bar(stat="identity") + ylim(c(0,8600)) +  sum_rpk_gradient_cmd + BAR_THEME_FIG1_leg
+```
+
+# 5. Fig 1a redo
+
+### --PDF
+
+```{r,fig.height=6.3,fig.width=14}
+fig1_full_case_redo    <- plot_grid(bar_sumrpk_case_colored,plot_annot_bar_case,plot_case_heatmap,rel_heights = c(1,0.4,4.5),align = "v",ncol = 1)
+fig1_full_healthy_redo <- plot_grid(bar_sumrpk_hc_colored,plot_annot_bar_hc,plot_healthy_heatmap,rel_heights = c(1,0.4,4.5),align = "v",ncol = 1)
+
+fig1a_dod_v2 <- plot_grid(fig1_full_case_redo,fig1_full_healthy_redo,ncol = 2,rel_widths = c(7,7),align = "h")
+
+plot_fig1a_fh <- file.path(PLOT_DIR_MAIN,"fig1a_dod.pdf")
+pdf(file = plot_fig1a_fh,height = 6.3,width = 14)
+fig1a_dod_v2
+dev.off()
+```
+
+### --PDF with cluster annotations
+```{r,fig.height=6.7,fig.width=14}
+fig1_full_case_redo2    <- plot_grid(bar_sumrpk_case_colored,plot_annot_bar_case,plot_annot_reg_case,plot_case_heatmap,rel_heights = c(1,0.4,0.4,4.5),align = "v",ncol = 1)
+fig1_full_healthy_redo2 <- plot_grid(bar_sumrpk_hc_colored,plot_annot_bar_hc,plot_annot_reg_hc,plot_healthy_heatmap,rel_heights = c(1,0.4,0.4,4.5),align = "v",ncol = 1)
+
+fig1a_dod_v2_clus_label <- plot_grid(fig1_full_case_redo2,fig1_full_healthy_redo2,ncol = 2,rel_widths = c(7,7),align = "h")
+
+plot_fig1a_fh2 <- file.path(PLOT_DIR_MAIN,"fig1a_dod.cluslabel.pdf")
+pdf(file = plot_fig1a_fh2,height = 6.7,width = 14)
+fig1a_dod_v2_clus_label
+dev.off()
+```
+
+
+### --PDF with peptide labels
+```{r,fig.height=6.7,fig.width=14}
+fig1_full_case_redo3    <- plot_grid(bar_sumrpk_case_colored,plot_annot_bar_case,plot_annot_reg_case,plot_case_heatmap_v3,rel_heights = c(1,0.4,0.4,4.5),align = "v",ncol = 1)
+fig1_full_healthy_redo3 <- plot_grid(bar_sumrpk_hc_colored,plot_annot_bar_hc,plot_annot_reg_hc,plot_healthy_heatmap,rel_heights = c(1,0.4,0.4,4.5),align = "v",ncol = 1)
+
+fig1a_dod_v3_pep_label <- plot_grid(fig1_full_case_redo3,fig1_full_healthy_redo3,ncol = 2,rel_widths = c(7,7),align = "h")
+
+plot_fig1a_fh3 <- file.path(PLOT_DIR_QC,"fig1a_dod.pepcluslabel.pdf")
+pdf(file = plot_fig1a_fh3,height = 10,width = 14)
+fig1a_dod_v3_pep_label
+dev.off()
+```
+
+
+# 6. Plot Color bar sum RPK (scaled)
+
+### a. barplot
+```{r}
+plot_fig1a_color_bar_fh <- file.path(PLOT_DIR_MAIN,"color_barplot_fig1a_dod.pdf")
+pdf(file = plot_fig1a_color_bar_fh,height = 5,width = 8)
+bar_sumrpk_case_colored_v2
+dev.off()
+```
+
+### b. heatmap
+```{r}
+plot_fig1a_color_hp_fh <- file.path(PLOT_DIR_MAIN,"color_heatmap_fig1a_dod.pdf")
+pdf(file = plot_fig1a_color_hp_fh,height = 5,width = 8)
+plot_case_heatmap_v2
+dev.off()
+```
+
+# 7. Redo UMAP Fig 1
+
+### a. create color gradient column
+```{r}
+color_bracket_col <- row.names(sample_tiny_umap)
+
+case_and_hc_motif_df      <- rbind(df_annot_bar_case_motif,df_annot_bar_hc_motif)
+bracket_conv_list        <- case_and_hc_motif_df$color_bracket
+names(bracket_conv_list) <- case_and_hc_motif_df$sample_fc
+bracket_conv_list        <- as.list(bracket_conv_list)
+
+for (i in 1:length(color_bracket_col)) {
+  curr_val <- color_bracket_col[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col[i] <- val_bracket
+}
+
+# Make color gradient
+uni_brackets_umap <- unique(color_bracket_col)
+bar_colors_umap   <- c()
+for (bracket in as.numeric(uni_brackets_umap)) {
+  bar_colors_umap <- c(bar_colors_umap,color_list[bracket])
+}
+names(bar_colors_umap) <- uni_brackets_umap
+```
+
+### b. PDF - Plot
+
+### --theme
+```{r}
+label_theme_umap_v2 <- theme(axis.line=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank())
+```
+
+```{r,fig.height=5,fig.width=6}
+umap_fig1_motif <- tibble(x = sample_tiny_umap[,1],y = sample_tiny_umap[,2],sample = color_bracket_col) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=1) + scale_color_manual(values = bar_colors_umap) + label_theme_umap_v2
+
+plot_fig1a_umap_fh <- file.path(PLOT_DIR_MAIN,"fig1a_dod.umap.pdf")
+pdf(file = plot_fig1a_umap_fh,height = 5,width = 7)
+umap_fig1_motif
+dev.off()
+```
+
+# 8. UMAP by cluster
+
+### --complete cluster 1
+```{r}
+complete_cluster1_df   <- master_cluster_table[master_cluster_table$cluster_final %in% "cluster1",]
+complete_cluster1_ids <- unique(complete_cluster1_df$studyid)
+```
+
+### a. create color columns
+```{r}
+df_umap_fig1 <- as.data.frame(sample_tiny_umap)
+names(df_umap_fig1) <- c("x","y","z")
+
+# add relevant columns
+df_umap_fig1$patient <- row.names(df_umap_fig1)
+df_umap_fig1$patient <- str_replace_all(df_umap_fig1$patient,"_FC","")
+df_umap_fig1$cluster <- row.names(df_umap_fig1)
+df_umap_fig1$cluster <- tstrsplit(df_umap_fig1$cluster,"_")[[1]]
+df_umap_fig1$cluster[df_umap_fig1$cluster %in% complete_cluster1_ids] <- "Cluster 1"
+df_umap_fig1$cluster[df_umap_fig1$cluster %in% cluster2_ids]          <- "Cluster 2"
+df_umap_fig1$cluster[! df_umap_fig1$cluster %in% c("Cluster 1","Cluster 2")] <- "Remaining"
+
+dot_clus_colors_fig1 <- c("red","purple","black")
+names(dot_clus_colors_fig1) <- c("Cluster 1","Cluster 2","Remaining")
+```
+
+### b. subset dots to label
+```{r}
+outlier1    <- df_umap_fig1[df_umap_fig1$cluster %in% c("Cluster 1","Cluster 2"),]
+outlier2    <- df_umap_fig1[df_umap_fig1$x < -2.5,]
+outlier_pts <- unique(outlier1$patient,outlier2$patient)
+
+outlier_df  <- df_umap_fig1[df_umap_fig1$patient %in% outlier_pts,]
+```
+
+### b. re-make plot
+```{r,fig.height=5,fig.width=7}
+umap_fig1_clus <- ggplot(df_umap_fig1,aes(x = x,y = y,col=cluster)) + 
+  geom_point(size=1) + scale_color_manual(values = dot_clus_colors_fig1) + 
+  geom_text_repel(data=outlier_df,aes(x,y,label=patient),hjust = -0.5, nudge_x = 0.25, show.legend = FALSE,size =2,max.overlaps = 50) + 
+  label_theme_umap_v2
+
+
+plot_fig1a_umap_fh2 <- file.path(PLOT_DIR_MAIN,"fig1a_dod.umap.Cluster.pdf")
+pdf(file = plot_fig1a_umap_fh2,height = 5,width = 7)
+umap_fig1_clus
+dev.off()
+```
+
+# -------------------------------------
+
+# REDO FIG 1b - GGPLOT version
+
+# 1. Fig 1b. Cluster 1 heatmap ggplot
+
+### a. format ggplot input
+```{r}
+# pre post annot bar
+df_annot_bar_case_clus1 <- df_annot_bar_case[df_annot_bar_case$sample %in% ordered_ms_cluster1_full,]
+df_annot_bar_case_clus1$type <- tstrsplit(df_annot_bar_case_clus1$sample,"_")[[1]]
+# matrix - cluster 1 and only top genes
+df_case_logfc_plot_clus1 <- df_case_logfc_plot[df_case_logfc_plot$sample %in% ordered_ms_cluster1_full,]
+df_case_logfc_plot_clus1 <- df_case_logfc_plot_clus1[df_case_logfc_plot_clus1$peptide %in% pt_hits_df_top$peptides,]
+df_case_logfc_plot_clus1$type <- tstrsplit(df_case_logfc_plot_clus1$sample,"_")[[1]]
+```
+
+### b. plot annotation bar
+```{r}
+WIDTH      = 1.0
+MARGINS    = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND     = c(0.0,0.0)
+label_theme_bar <- theme(axis.line=element_blank(),
+                          axis.text.y=element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank(),
+                          plot.margin = MARGINS)
+
+# annotation bar
+plot_annot_bar_case_clus1 <- ggplot(df_annot_bar_case_clus1, aes(x = sample, y = value,xmin=0,xmax=length(ordered_ms_cluster1_full),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+```
+
+### c. plot Heatmap cluster 1
+```{r}
+# HEATMAP commands - cluster 1
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND  = c(0.0,0.0)
+LIMS    = c(-3, 4)
+label_theme_heatmap_ggplot_clus1 <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+# Cases
+plot_case_heatmap_clus1 <- ggplot(df_case_logfc_plot_clus1, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + scale_fill_gradient(limits = LIMS,low="white",high="red") + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_clus1
+```
+
+
+### d. PDF - panel
+```{r,fig.height=5,fig.width=8}
+fig1b_dod    <- plot_grid(plot_annot_bar_case_clus1,plot_case_heatmap_clus1,rel_heights = c(0.4,4.5),align = "v",ncol = 1)
+
+plot_fig1b_fh <- file.path(PLOT_DIR_MAIN,"fig1b_dod.pdf")
+pdf(file = plot_fig1b_fh,height = 5,width = 8)
+fig1b_dod
+dev.off()
+```
+
+
+
+
+# -------------------------------------
+
+
+# FIGURE 1 - DOD Metadata plots
+
+# 1. load metadata
+
+### a. load and format metadata
+```{r}
+metadata_case_ctrl <- "metadata/Case_Control_Serum.csv"
+metadata_extra     <- "metadata/DoDSR_Case_Info-FINAL.csv"
+
+metadata_case_ctrl <- read.csv(metadata_case_ctrl,stringsAsFactors = F)
+metadata_extra     <- read.csv(metadata_extra,stringsAsFactors = F)
+
+# Add in year of onset and Dx 
+metadata_extra_sub <- metadata_extra[,c("StudyID","D_onset","D_DX")]
+names(metadata_extra_sub)[1] <- "studyid"
+
+# Case Meta data
+metadata_dod <- metadata_case_ctrl %>% inner_join(metadata_extra_sub)
+```
+
+### b. add useful columns for plots
+```{r}
+metadata_dod$Pre_time_to_onset  <- metadata_dod$Pre_Ser_Yr - metadata_dod$D_onset
+metadata_dod$Post_time_to_onset <- metadata_dod$Post_Ser_Yr - metadata_dod$D_onset
+metadata_dod$Age_to_Pre         <- metadata_dod$Pre_Ser_Yr - metadata_dod$year_birth
+metadata_dod$Age_to_Post        <- metadata_dod$Post_Ser_Yr - metadata_dod$year_birth
+metadata_dod$Age_to_Onset       <- metadata_dod$D_onset - metadata_dod$year_birth
+metadata_dod$Age_diff           <- metadata_dod$Age_to_Post - metadata_dod$Age_to_Pre
+
+metadata_dod_sub <- metadata_dod[metadata_dod$Age_diff <= 3,]
+```
+
+
+# 2. Density Time to onset pre post
+
+#### --theme
+```{r}
+theme_demo_plots <- theme(axis.line=element_blank(),
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank())
+```
+
+```{r}
+mean_age <- round(mean(c(metadata_dod$Age_to_Pre,metadata_dod$Age_to_Onset)))
+
+plot_df1 <- metadata_dod[,c("studyid","Age_to_Pre")]
+plot_df2 <- metadata_dod[,c("studyid","Age_to_Onset")]
+names(plot_df1)[2] <- "Age"
+names(plot_df2)[2] <- "Age"
+plot_df1$annot     <- "Age_to_first_sample_PRE"
+plot_df2$annot     <- "Age_to_MS_Onset"
+
+plot_df_onset <- rbind(plot_df1,plot_df2)
+
+dem_plot1 <- ggplot(plot_df_onset,aes(x=Age,color=annot,fill=annot))+ geom_density(alpha=0.4) + geom_vline(xintercept = mean_age, linetype="dashed", color = "black") + theme_demo_plots
+```
+
+# 3. Time to onset dot plot
+```{r}
+plot_df1 <- metadata_dod[,c("studyid","Pre_time_to_onset")]
+plot_df2 <- metadata_dod[,c("studyid","Post_time_to_onset")]
+names(plot_df1)[2] <- "TimeToMSonset"
+names(plot_df2)[2] <- "TimeToMSonset"
+plot_df1$annot     <- "PRE"
+plot_df2$annot     <- "POST"
+
+plot_df_time_to_onset <- rbind(plot_df1,plot_df2)
+
+dem_plot2 <- ggplot(plot_df_time_to_onset,aes(x=TimeToMSonset,y=factor(annot)))+ geom_boxplot() + theme_demo_plots + geom_vline(xintercept = 0, linetype="dashed", color = "black")
+
+# With dotplot
+dem_plot2_v2 <- ggplot(plot_df_time_to_onset,aes(x=TimeToMSonset,y=factor(annot)))+ geom_jitter(position = position_jitter(width = 0.05)) + theme_demo_plots + geom_vline(xintercept = 0, linetype="dashed", color = "black")
+```
+
+# 4. Panel -PDF
+```{r,fig.height=5,fig.width=14}
+fig1_demo_panel <- plot_grid(dem_plot1,dem_plot2,rel_widths = c(8,6),ncol = 2,align = "h")
+fig1_demo_panel_v2 <- plot_grid(dem_plot1,dem_plot2_v2,rel_widths = c(8,6),ncol = 2,align = "h")
+
+plot_fig1_dem_fh <- file.path(PLOT_DIR_MAIN,"fig1_demo_panel_dod.pdf")
+pdf(file = plot_fig1_dem_fh,height = 5,width = 14)
+fig1_demo_panel
+dev.off()
+
+plot_fig1_dem_fh2 <- file.path(PLOT_DIR_MAIN,"fig1_demo_panel_dod.v2.pdf")
+pdf(file = plot_fig1_dem_fh2,height = 5,width = 14)
+fig1_demo_panel_v2
+dev.off()
+```
+
+
+# -------------------------------------
+
+
+# FIGURE 2 - DOD
+
+# 1. Load
+```{r}
+obj_fh  <- "objects/Fig2_Obj.RData"
+load(obj_fh)
+
+# Read in alternative organisms with motif
+#  - Each sequence needs to be shortened down to 49 AA
+alt_org_fh <- "resources/alternative_organisms_with_regex.csv"
+alt_org_df <- read.csv(alt_org_fh,stringsAsFactors = F)
+
+# motif
+MOTIF_REGEX <- "P[AS].[SGA]R[SN][RLHK]"
+```
+
+## --write motif CSV
+```{r}
+motif_fh  <- "tables/motif_peptides.csv"
+write.csv(consensus_genelist,file = motif_fh,quote = F,row.names = F)
+
+# FASTA
+motif_fasta_fh  <- "tables/motif_peptides.fasta"
+motif_seqs        <- consensus_genelist$sequence
+names(motif_seqs) <- consensus_genelist$peptide_id
+motif_seqs        <- AAStringSet(motif_seqs)
+
+writeXStringSet(motif_seqs,format = "fasta",filepath = motif_fasta_fh)
+```
+
+
+## --FUNC FIG2
+```{r}
+# function for multiple alignment map
+# - This function was written by Jayant Rajan
+make_alignment_map <- function(peptide_set, highlight_color) {
+  aln <- AlignSeqs(peptide_set) 
+  
+  #find the bounds for the reference sequence (assumed to be first sequence)
+  goodres <- which(unlist(strsplit(as.character(aln[length(aln),]),'')) != "-")
+  
+  aln_sub <- subseq(aln,goodres[1],goodres[length(goodres)])
+  aln_mat <- as.matrix(aln_sub)
+  aln_mat[which(aln_mat == "-")] <- " "
+  
+  #restrict the alignment matrix to residues overlapping with the reference fragment
+  overlaps_ref <- which(aln_mat[length(aln),] != " ")
+  
+  aln_mat2 <- aln_mat[,c(overlaps_ref[1]:overlaps_ref[length(overlaps_ref)])]
+  
+  cons_pos <- apply(aln_mat2,2,function(x) {table(x)})
+  
+  #return(cons_pos)
+  selected_res <- lapply(cons_pos, function(x) {
+    comp_len <- 0.5*length(peptide_set) #at a given position, at least 50% of the peptides should cover
+    
+    if (length(grep(' ',names(x))) == 0) {
+      x_ss <- x
+    } else {
+      x_ss <- x[2:length(x)]
+    }
+    
+    if (sum(x_ss) >= comp_len) {
+      idx <- which(x_ss >= 0.8*sum(x_ss))
+      
+      if (length(idx) == 0) {
+        return(list("FALSE",' '))
+      } else {
+        if (names(x_ss)[idx] != ' ') {
+          return(list("TRUE", names(x_ss)[idx]))
+        } else {
+          return(list("FALSE",' '))
+        }
+      }
+    } else {
+      return(list("FALSE",' '))
+    }
+  })
+  
+  text_color <- matrix("grey50",ncol=ncol(aln_mat2),nrow=nrow(aln_mat2))
+  tile_color <- matrix("white",ncol=ncol(aln_mat2),nrow=nrow(aln_mat2))
+  
+  for (i in 1:length(selected_res)) {
+    if (selected_res[[i]][1] == "FALSE") {
+      
+    } else {
+      idx <- which(aln_mat2[,i] == selected_res[[i]][2])
+      
+      text_color[,i][idx] <- "black"
+      tile_color[,i][idx] <- highlight_color
+    }
+  }
+  
+  residues <- as.vector(t(aln_mat2))
+  tiles <- as.vector(t(tile_color))
+  text <- as.vector(t(text_color))
+  y <- factor(unlist(lapply(names(peptide_set), function(x) {rep(x, ncol(aln_mat2))})), names(peptide_set))
+  x <- rep(c(1:ncol(aln_mat2)),nrow(aln_mat2))
+  
+  return(data.frame(x,y,text,tiles,residues,stringsAsFactors=FALSE))
+}
+```
+
+# 2. Set up input
+
+### a. All 119 peptides
+```{r}
+peptide_set_input        <- consensus_genelist$sequence
+names(peptide_set_input) <- consensus_genelist$peptide_id
+peptide_set_input        <- AAStringSet(peptide_set_input)
+
+# Function - mult aln of all 119 motif peptides
+maln_map <- make_alignment_map(peptide_set = peptide_set_input,highlight_color = "blue")
+
+
+# Target peptides from Luminex analysis
+target_motif_peptides <- c("KRT75_287686","KRT75_287685",
+                          "RIMS2_627827", "RIMS2_337979","RIMS2_306095","RIMS2_306096",
+                          "SRSF4_342020","SRSF4_342019","SRSF4_682211","SRSF7_101254",
+                          "TRIO_395474")
+# get luminex peptides
+consensus_genelist_target <- consensus_genelist[consensus_genelist$peptide_id %in% target_motif_peptides,]
+```
+
+
+
+### b. format alt species df
+```{r}
+# Alt species with motif
+# --zoom in on a 49 AA window around where the motif is for each alt species
+new_seq_col <- c()
+
+PEPTIDE_LEN   = 49
+PRE_MOTIF_LEN = 5
+for (i in 1:nrow(alt_org_df)) {
+  row_df <- alt_org_df[i,]
+  row_gene <- row_df$gene
+  row_seq  <- row_df$sequence
+  
+  match_results <- regexpr(MOTIF_REGEX,row_seq)
+  match_pos     <- as.numeric(match_results)
+  match_len     <- attr(match_results,"match.length")
+  pre_match_pos <- match_pos - PRE_MOTIF_LEN
+  motif_pep_substr <- substr(row_seq,pre_match_pos,(pre_match_pos+PEPTIDE_LEN-1))
+  
+  new_seq_col <- c(new_seq_col,motif_pep_substr)
+}
+alt_org_df$seq_with_motif <- new_seq_col
+
+# reformat alt_org_df to match other peptide dfs
+alt_org_df$peptide_id <- paste(alt_org_df$gene,row.names(alt_org_df),sep = "_")
+alt_org_df_fmt        <- alt_org_df[,c("uniprot_id","gene","seq_with_motif","peptide_id")]
+names(alt_org_df_fmt) <- names(consensus_genelist_target)
+```
+
+
+# -WRITE FASTA FOR CDHIT
+```{r}
+output_for_cdhit        <- c(consensus_genelist$sequence,alt_org_df_fmt$sequence)
+names(output_for_cdhit) <- c(consensus_genelist$peptide_id,alt_org_df_fmt$peptide_id)
+output_for_cdhit        <- AAStringSet(output_for_cdhit)
+
+fasta_for_cdhit_fh <- "resources/fig2_CDHIT_results/motif_and_alt_species_peptides.fasta"
+writeXStringSet(output_for_cdhit,format = "fasta",filepath = fasta_for_cdhit_fh)
+```
+
+# ---
+
+# PLOT CDHIT PEPS
+
+* Builds off of the original Figure 2 data frames generated above
+
+* CD hit was run in the terminal to generate output
+  * Directory location:
+    * resources/fig2_CDHIT_results
+  * command:
+  cd-hit -i motif_and_alt_species_peptides.fasta -c 0.65 -d 52 -o cluster_output_motif_and_alt_species
+  
+* next I used <format_cdhit_results.pl> to format the CDHIT output
+
+# --OMIT for Visualization 
+* These peptides do not align strongly in the multiple alignment
+```{r}
+omit_for_viz <- c("KIAA2018_484209","KIAA1109_177126","KIAA1109_177400","TRA2B_456818",
+                  "CFAP97_174620","SRSF8_367178","DSG1_322970","SRSF1_550429","CLASRP_13379","NKTR_139362","TRA2B_456817","SRSF7_331012","MAP3K4_500084")
+```
+
+
+# 1. Load CDhit results
+```{r}
+cdhit_results_fh <- "resources/fig2_CDHIT_results/cluster_output_motif_and_alt_species.FORMATTED.clstr"
+cluster_df <- read.delim(cdhit_results_fh,stringsAsFactors = F)
+
+# Filter - per cluster only keep peptide with the highest identity to represent that cluster
+clusid_list <- unique(cluster_df$ClusterID)
+omit_peps   <- c()
+for (clus in clusid_list) {
+  one_clus <- cluster_df[cluster_df$ClusterID %in% clus,]
+  if(nrow(one_clus) > 1){
+    max_pep          <- one_clus[! one_clus$X.Ident %in% '*',]
+    max_pep$X.Ident  <- as.numeric(max_pep$X.Ident)
+    max_pep          <- max_pep[max_pep$X.Ident == max(max_pep$X.Ident),]
+    max_pep          <- max_pep$Peptide
+    remove           <- one_clus$Peptide[! one_clus$Peptide %in% max_pep]
+    omit_peps        <- c(omit_peps, remove)
+  }
+}
+
+cluster_df_filt <- cluster_df[! cluster_df$Peptide %in% omit_peps,]
+```
+
+
+# 2. Organize input data frames
+```{r}
+# Luminex peptides
+target_motif_peptides <- c("KRT75_287686","KRT75_287685",
+                          "RIMS2_627827", "RIMS2_337979","RIMS2_306095","RIMS2_306096",
+                          "SRSF4_342020","SRSF4_342019","SRSF4_682211","SRSF7_101254",
+                          "TRIO_395474")
+target_motif_peptides_filt <- target_motif_peptides[target_motif_peptides %in% cluster_df_filt$Peptide]
+
+# get luminex peptides
+aln_df1 <- consensus_genelist[consensus_genelist$peptide_id %in% target_motif_peptides_filt,]
+
+# alt species
+aln_df2 <- alt_org_df_fmt[alt_org_df_fmt$peptide_id %in% cluster_df_filt$Peptide,]
+
+# Remaining peptides from filtered CDhit df
+rem_filt_peptides <- cluster_df_filt$Peptide[! cluster_df_filt$Peptide %in% c(aln_df1$peptide_id,aln_df2$peptide_id)]
+
+aln_df3 <- consensus_genelist[consensus_genelist$peptide_id %in% rem_filt_peptides,]
+```
+
+# 3. merge and mult align
+```{r}
+input_motif_pep_df2 <- rbind(aln_df2,aln_df3,aln_df1)
+
+# Generate mult. aln.
+peptide_set_input3        <- input_motif_pep_df2$sequence
+names(peptide_set_input3) <- input_motif_pep_df2$peptide_id
+peptide_set_input3        <- AAStringSet(peptide_set_input3)
+
+# Function
+maln_map_cdhit <- make_alignment_map(peptide_set = peptide_set_input3,highlight_color = "blue")
+```
+
+# 4. Plot - show motif match locations
+
+### a. adjust coloring
+```{r}
+maln_map_plot <- maln_map_cdhit
+plot_pep_list <- as.character(unique(maln_map_plot$y))
+
+# Create an index column
+maln_map_plot$index <- paste(maln_map_plot$x,maln_map_plot$y,sep = "_")
+
+all_motif_positions <- c()
+for (pep in plot_pep_list) {
+  pep_maln_df <- maln_map_plot[maln_map_plot$y %in% pep,]
+  
+  pep_aln_seq <- pep_maln_df$residues 
+  #pep_aln_seq <- pep_aln_seq[! pep_aln_seq %in% " "]
+  pep_aln_seq <- paste(pep_aln_seq,collapse = "")
+  
+  match_results <- regexpr(MOTIF_REGEX,pep_aln_seq)
+  match_pos     <- as.numeric(match_results)
+  match_len     <- attr(match_results,"match.length")
+  
+  all_match_pos <- match_pos:(match_pos+match_len-1)
+  pep_maln_df_match <- pep_maln_df[pep_maln_df$x %in% all_match_pos,]
+  
+  all_motif_positions <- c(all_motif_positions,pep_maln_df_match$index)
+}
+
+# Change color based on motif matches
+maln_map_plot[maln_map_plot$index %in% all_motif_positions,"tiles"] <- "blue"
+```
+
+### b. plot themes
+```{r}
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND  = c(0.0,0.0)
+LIMS    = c(-3, 4)
+label_theme_fig2 <- theme(panel.grid.major = element_blank(),
+                          panel.grid.minor = element_blank(),
+                          panel.background=element_rect(fill="white",color="black"),
+                          panel.border = element_rect(fill = NA,colour ="black"),
+                          axis.title.x=element_blank(),
+                          axis.title.y = element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          plot.margin = MARGINS,
+                          legend.position="none")
+```
+
+
+### c. plot command
+```{r,fig.height=10,fig.width=10}
+maln_map_plot_filt <- maln_map_plot[! maln_map_plot$y %in% omit_for_viz,]
+
+# setup colors by color label
+tile_colors_names  <- unique(maln_map_plot$tiles)
+tile_colors        <- c("white","blue")
+names(tile_colors) <- tile_colors_names
+
+all_colors <- c(tile_colors)
+
+# color by tile
+plot_fig2_motif <- ggplot(maln_map_plot_filt,aes(x = x,y = y,fill=tiles)) + geom_tile(width=WIDTH) + 
+  geom_text(aes(x=x,y=y, label=residues),size=3) + 
+  scale_fill_manual(values = tile_colors) + 
+  label_theme_fig2
+```
+
+### d. PDF
+```{r}
+plot_fig2_fh3 <- file.path(PLOT_DIR_MAIN,"fig2_dod_motif_regex.pdf")
+pdf(file = plot_fig2_fh3,height = 10,width = 10)
+plot_fig2_motif
+dev.off()
+```
+
+
+# 5. Plot - most frequent AAs
+
+### a. adjust coloring based on AA freq
+```{r}
+AA_COLORS <- c("royalblue3","royalblue2","royalblue1")
+
+maln_map_plot2 <- maln_map_cdhit
+plot_pos_list <- as.numeric(unique(maln_map_plot2$x))
+
+# Create an index column
+maln_map_plot2$index  <- paste(maln_map_plot2$x,maln_map_plot2$residues,sep = ":")
+maln_map_plot2$tiles2 <- maln_map_plot2$index
+
+for (pos in plot_pos_list) {
+  pos_maln_df <- maln_map_plot2[maln_map_plot2$x == pos,]
+  uni_index   <- unique(pos_maln_df$index)
+  index_to_color <- rep("white",length(uni_index))
+  names(index_to_color) <- uni_index
+  
+  aa_freq_df <- as.data.frame(table(pos_maln_df$residues))
+  names(aa_freq_df) <- c("residue","freq")
+  aa_freq_df        <- aa_freq_df[!aa_freq_df$residue %in% " ",]
+  
+  # Only look at AAs with freq > 1
+  aa_freq_df <- aa_freq_df[aa_freq_df$freq > 1,]
+  
+  if(nrow(aa_freq_df) > 0){
+    aa_freq_df <- aa_freq_df[order(aa_freq_df$freq,decreasing = T),]
+    aa_freq_df$index <- paste(pos,aa_freq_df$residue,sep = ":")
+    
+    iter_rows <- nrow(aa_freq_df)
+    if(iter_rows > 3){iter_rows <- 3}
+    
+    for (i in 1:iter_rows) {
+      new_color <- AA_COLORS[i]
+      index     <- as.character(aa_freq_df[i,"index"])
+      index_to_color[names(index_to_color) %in% index] <- new_color
+    }
+  }
+  index_to_color <- as.list(index_to_color)
+  
+  # Convert index names
+  for (index in names(index_to_color)) {
+    c <- as.character(index_to_color[[index]])
+    maln_map_plot2$tiles2[maln_map_plot2$tiles2 %in% index] <- c
+  }
+}
+```
+
+
+### b. plot themes
+```{r}
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND  = c(0.0,0.0)
+LIMS    = c(-3, 4)
+label_theme_fig2 <- theme(panel.grid.major = element_blank(),
+                          panel.grid.minor = element_blank(),
+                          panel.background=element_rect(fill="white",color="black"),
+                          panel.border = element_rect(fill = NA,colour ="black"),
+                          axis.title.x=element_blank(),
+                          axis.title.y = element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          plot.margin = MARGINS,
+                          legend.position="none")
+```
+
+
+### c. tile and text colors
+* color pallets attempted: rainbow(20), inferno(20), viridis(20)
+```{r,fig.height=10,fig.width=10}
+maln_map_plot2_filt <- maln_map_plot2[! maln_map_plot2$y %in% omit_for_viz,]
+
+# setup colors by color label
+
+# Blue Color Scheme
+tile_colors_names  <- unique(maln_map_plot2$tiles2)
+tile_colors        <- c("white",blues9[2],blues9[4],blues9[7])
+names(tile_colors) <- tile_colors_names
+
+# Red/Orange/Yellow Color Scheme
+tile_colors_warm        <- c("white","gold","orange","darkred")
+names(tile_colors_warm) <- tile_colors_names
+
+# TEXT color
+text_color_col <- maln_map_plot2_filt$tiles2
+text_color_col[text_color_col %in% c("white","royalblue1","royalblue2")] <- "black"
+text_color_col[! text_color_col %in% "black"] <- "white"
+
+maln_map_plot2_filt$text_color <- text_color_col
+
+# Try to force text color
+text_colors_param        <- c("white","black")
+names(text_colors_param) <- text_colors_param
+```
+
+### d. plot command
+```{r,fig.height=10,fig.width=11}
+plot_fig2_aa_freq <- ggplot(maln_map_plot2_filt,aes(x = x,y = y,fill=tiles2)) + geom_tile(width=WIDTH) + 
+  geom_text(aes(x=x,y=y, label=residues,color=text_color),size=3) + 
+  scale_fill_manual(values = tile_colors) + scale_color_manual(values = text_colors_param) + 
+  label_theme_fig2
+```
+
+
+
+### e. PDF
+```{r,fig.height=10,fig.width=11}
+plot_fig2_fh4 <- file.path(PLOT_DIR_MAIN,"fig2_dod_aa_freq.pdf")
+pdf(file = plot_fig2_fh4,height = 10,width = 11)
+plot_fig2_aa_freq
+dev.off()
+```
+
+
+# ---
+
+# FIGURE 2 - Dotplot
+
+# 1. Load sum RPK tables
+```{r}
+rpk_list <- read.csv("consensus_seq_totals.csv", stringsAsFactors=FALSE)
+sampl_study <- read.csv("metadata/list_with_plate_locations.csv", stringsAsFactors=FALSE)
+sampl_study2 <- read.csv("metadata/Case_Control_Serum.csv", stringsAsFactors=FALSE)
+clusters     <- master_cluster_table[,c("sample","cluster")]
+
+xp_metadata <- read.csv("metadata/DoDSR_Case_Info-FINAL.csv", stringsAsFactors=FALSE)
+```
+
+
+# 2. Format input df
+```{r}
+colnames(sampl_study2) <- c("studyid", "type", "sex", "year_birth", "race", "race_ethnic", "year_entry", "pre" , "post", "Pre_Ser_Yr",   "Post_Ser_Yr" )
+
+long_samp_study2 <- sampl_study2 %>% gather(key = prepost, value= serumid, -studyid, -type, -sex, -year_birth, -race, -race_ethnic, -year_entry, -Pre_Ser_Yr, -Post_Ser_Yr)
+long_samp_study2$type <- gsub(" ", "_", long_samp_study2$type)
+long_samp_study2$sample <- paste0(long_samp_study2$studyid, "_", long_samp_study2$type, "_", long_samp_study2$prepost)
+
+rpk_list <- rpk_list[, -1]
+
+### Merge
+long_samp_study2 <- full_join(long_samp_study2, rpk_list, by= "sample")
+long_samp_study2 <- left_join(long_samp_study2, clusters, by= "sample")
+long_samp_study2$pair <- substr(long_samp_study2$studyid, 1, 5)
+
+### Change labels
+for (i in 1:nrow(long_samp_study2)){
+  if (is.na(long_samp_study2$studyid[i])){
+    if (grepl(pattern = "bead", long_samp_study2$sample[i])){
+      long_samp_study2$studyid[i] <- long_samp_study2$sample[i]
+      long_samp_study2$type[i] <- "bead"
+
+    } else if(grepl(pattern = "gfap", long_samp_study2$sample[i])){
+      long_samp_study2$studyid[i] <- long_samp_study2$sample[i]
+      long_samp_study2$type[i] <- "gfap"
+   
+    } else{
+      long_samp_study2$studyid[i] <- long_samp_study2$sample[i]
+      long_samp_study2$type[i] <- "origins"
+    }
+  }
+}
+```
+
+
+# 3. Plot - with Stats comparison
+```{r,fig.height=5,fig.width=8}
+my_comparisons <- list( c("healthy_controls", "Case") )
+
+plot_df_fig2_dot <- long_samp_study2 %>% filter(type != "gfap")
+
+fig2_dotplot <- plot_df_fig2_dot %>% ggboxplot(x = "type", y = "sum_rpk",color = "type",add = "jitter", shape = "type") + 
+  stat_compare_means(comparisons = my_comparisons) + # Add pairwise comparisons p-value
+  stat_compare_means(label.y = 8000)                   # Add global p-value
+```
+# 4. PDF
+```{r}
+plot_fig2_dotplot_fh <- file.path(PLOT_DIR_MAIN,"fig2_dod_dotplot.pdf")
+pdf(file = plot_fig2_dotplot_fh,height = 5,width = 8)
+fig2_dotplot
+dev.off()
+
+# Print df for making this plot
+table_fig2_dotplot <- file.path(TABLE_DIR_MAIN,"table_fig2_dod_dotplot.csv")
+write.csv(plot_df_fig2_dot,file = table_fig2_dotplot,row.names = F,quote = F)
+```
+
+# -------------------------------------
+
+# REDO FIG 2 - Barplot
+
+# 1. Load df_fc_z and subset motif peptides
+```{r}
+fh_df_fc_z <- "objects/Fig1_df_fc_z.RData"
+load(fh_df_fc_z)
+
+# Susbet by motif peptides
+filt_peps_fig2   <- as.character(unique(maln_map_plot2_filt$y))
+all_peps_to_keep <- c(motif_peptides,filt_peps_fig2)
+df_fc_z_motif <- df_fc_z[df_fc_z$peptide_id %in% all_peps_to_keep,]
+
+rm(df_fc_z)
+```
+
+# 2. Calculate pos patients per peptide 
+
+### a. create binary df
+```{r}
+# Only iterate through cases
+all_cols          <- names(df_fc_z_motif)
+list_case_samples <- c(case_pre_fc_cols,case_post_fc_cols)
+list_case_samples <- str_replace_all(list_case_samples,"_FC","")
+list_case_samples <- list_case_samples[list_case_samples %in% all_cols]
+
+binary_motif_pep_df <- createPepEnrichStatusDataFrameDoD(pep_df = df_fc_z_motif,
+                                                   list_of_samples = list_case_samples, 
+                                                   MIN_RPK = 0,FC_THRESH1 = 10, FC_THRESH2 = 0, 
+                                                   SUM_RPK_THRESH = 0, 
+                                                   ZSCORE_THRESH1 = 0,ZSCORE_THRESH2 = 0)
+```
+
+### b. sum hits
+```{r}
+list_pre_samples  <- names(binary_motif_pep_df)[grep("_pre",names(binary_motif_pep_df))]
+list_post_samples <- names(binary_motif_pep_df)[grep("_post",names(binary_motif_pep_df))]
+list_all_cases    <- c(list_pre_samples,list_post_samples)
+
+# Also sums
+binary_motif_pep_df$total_case_hits      <- rowSums(binary_motif_pep_df[,list_all_cases])
+binary_motif_pep_df$total_pre_case_hits  <- rowSums(binary_motif_pep_df[,list_pre_samples])
+binary_motif_pep_df$total_post_case_hits <- rowSums(binary_motif_pep_df[,list_post_samples])
+
+motif_case_sum_bar_df <- binary_motif_pep_df[,c("total_pre_case_hits","total_post_case_hits","total_case_hits")]
+motif_case_sum_bar_df$peptide_id <- row.names(motif_case_sum_bar_df)
+```
+
+# 3. Add in peptide seqs
+```{r}
+motif_case_sum_bar_df <- consensus_genelist %>% select(peptide_id,sequence) %>% inner_join(motif_case_sum_bar_df)
+
+# SORT
+motif_case_sum_bar_df <- motif_case_sum_bar_df[order(motif_case_sum_bar_df$total_case_hits,decreasing = T),]
+```
+
+
+
+# 4. Write CSV
+```{r}
+fh_motif_case_count <- file.path(TABLE_DIR_MAIN,"motif_pep_case_count_fig2.csv")
+write.csv(motif_case_sum_bar_df,file = fh_motif_case_count,quote = F,row.names = F)
+```
+
+# 5. CSV of peptides + counts
+```{r}
+filt_peps_motif <- input_motif_pep_df2[input_motif_pep_df2$peptide_id %in% unique(maln_map_plot2_filt$y),]
+row.names(filt_peps_motif) <- filt_peps_motif$peptide_id
+filt_peps_motif            <- filt_peps_motif[unique(maln_map_plot2_filt$y),]
+
+# Add patient pos counts to alignment info
+subset_pt_counts_df <- data.frame(matrix(nrow = 0,ncol = 4))
+count_cols          <- c("peptide_id","total_pre_case_hits","total_post_case_hits","total_case_hits")
+names(subset_pt_counts_df) <- count_cols
+for (pep in filt_peps_motif$peptide_id) {
+  entry <- data.frame(matrix(0,nrow = 1,ncol = 4))
+  names(entry) <- count_cols
+  entry$peptide_id <- pep
+  
+  if(pep %in% motif_case_sum_bar_df$peptide_id){
+    motif_df_sub <- motif_case_sum_bar_df[motif_case_sum_bar_df$peptide_id %in% pep,]
+    
+    # Fill in pt count values
+    entry$total_pre_case_hits <- motif_df_sub$total_pre_case_hits
+    entry$total_post_case_hits <- motif_df_sub$total_post_case_hits
+    entry$total_case_hits <- motif_df_sub$total_case_hits
+  }
+  subset_pt_counts_df <- rbind(subset_pt_counts_df, entry)
+}
+subset_pt_counts_df$peptide_id <- NULL
+
+filt_peps_motif_fin <- cbind(filt_peps_motif,subset_pt_counts_df)
+
+table_fig2_plot_peps <- file.path(TABLE_DIR_MAIN,"table_fig2_dod_peptides.csv")
+write.csv(filt_peps_motif_fin,file = table_fig2_plot_peps,quote = F,row.names = F)
+```
+
+
+# 6. PDF - Barplot for aln Fig 2
+```{r,fig.height=10,fig.width=11}
+BAR_THEME_FIG2 <- theme(legend.position="none", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title=element_blank(),
+                 axis.ticks.y=element_blank(),
+                 axis.text.y = element_text(size = 5),
+                 plot.background = element_blank())
+# Change levels
+bar_fig2_df <- motif_case_sum_bar_df
+bar_fig2_df <- bar_fig2_df[!is.na(bar_fig2_df$peptide_id),]
+bar_fig2_df$peptide_id <- factor(bar_fig2_df$peptide_id,levels = rev(bar_fig2_df$peptide_id))
+
+# Color gradient
+# - limits based on number of positive patients
+fig2_bar_gradient_cmd <- scale_fill_gradientn(colours = inferno(100),limits = c(0,54))
+
+fig2_sorted_barplot <-ggplot(data=bar_fig2_df, aes(x=peptide_id, y=total_case_hits,fill = total_case_hits)) +
+  geom_bar(stat="identity") + coord_flip() + BAR_THEME_FIG2 + fig2_bar_gradient_cmd
+
+
+### PDF 
+plot_fig2_barplot_fh <- file.path(PLOT_DIR_MAIN,"fig2_dod_barplot_aln.pdf")
+pdf(file = plot_fig2_barplot_fh,height = 10,width = 4)
+fig2_sorted_barplot
+dev.off()
+```
+
+
+
+# -------------------------------------
+
+# FIGURE 3 - ORIGINS
+
+# 1. load objects
+```{r}
+obj_fh  <- "objects/Fig3_Obj.RData"
+obj_fh2 <- "objects/Fig3_df_fc_z.RData"
+load(obj_fh)
+load(obj_fh2)
+```
+
+# 2. Make filtered data frames
+
+### a. CSF
+```{r}
+origins_csf_df <- candidate_df_exp_csf_fin[c("peptide_id", origins_ms_fc_csf_cols, ctrl_fc_csf_cols, bead_fc_cols)]
+
+num_samples <- length(origins_ms_fc_csf_cols)
+origins_csf_df <- origins_csf_df %>% mutate(count_rich = rowSums(origins_csf_df[, origins_ms_fc_csf_cols[1:num_samples]] > 10))
+origins_csf_df <- origins_csf_df %>% filter(count_rich > 10)
+
+# Create top candidates df
+top_csf_peptides   <- as.vector(origins_csf_df$peptide_id)
+top_candidates_csf <- candidate_df_exp_csf_fin %>% filter(peptide_id %in% top_csf_peptides)
+top_candidates_csf <- arrange(top_candidates_csf, gene)
+```
+
+### b. Serum
+```{r}
+origins_serum_df <- candidate_df_exp_serum_fin[c("peptide_id", origins_ms_fc_serum_cols, ctrl_fc_serum_cols, bead_fc_cols)]
+
+num_samples <- length(origins_ms_fc_serum_cols)
+origins_serum_df <- origins_serum_df %>% mutate(count_rich = rowSums(origins_serum_df[, origins_ms_fc_serum_cols[1:num_samples]] > 10))
+origins_serum_df <- origins_serum_df %>% filter(count_rich > 12)
+
+# Create top candidates df
+top_serum_peptides   <- as.vector(origins_serum_df$peptide_id)
+top_candidates_serum <- candidate_df_exp_serum_fin %>% filter(peptide_id %in% top_serum_peptides)
+top_candidates_serum <- arrange(top_candidates_serum, gene)
+```
+
+
+# 3. Find overlap with Cluster 1 top peptides
+```{r}
+# Peptides that are both PairSeq hits and overlap with Fig 1
+all_top_origins_peptides <- unique(c(top_csf_peptides,top_serum_peptides)) # all top PairSeq hits
+overlap_top_origins_peptides     <- all_top_origins_peptides[all_top_origins_peptides %in% pt_hits_df$peptides]
+overlap_top_origins_peptides_csf   <- top_csf_peptides[top_csf_peptides %in% overlap_top_origins_peptides]
+overlap_top_origins_peptides_serum <- top_serum_peptides[top_serum_peptides %in% overlap_top_origins_peptides]
+```
+
+
+# 4. Filter full data frame df_fc_z
+```{r}
+# peptide filter
+origins_all_df <- df_fc_z[df_fc_z$peptide_id %in% c(all_top_origins_peptides,pt_hits_df_top$peptides),]
+# sample filter
+cols_csf_serum <- c("peptide_id", origins_ms_fc_serum_cols, origins_ms_fc_csf_cols,
+                    ctrl_fc_serum_cols, ctrl_fc_csf_cols,bead_fc_cols)
+origins_all_df <- origins_all_df[,names(origins_all_df) %in% cols_csf_serum]
+
+rm(df_fc_z)
+```
+
+
+# 5. Overlapping Peptide heatmaps
+
+### a. groupings
+```{r}
+ms_origins_samples   <- c(origins_ms_fc_csf_cols,origins_ms_fc_serum_cols)
+ctrl_origins_samples <- c(ctrl_fc_csf_cols,ctrl_fc_serum_cols)
+
+# Make sure you can interleave CSF and serum
+ms_origins_samples_filt <- c()
+for (pt in unique(tstrsplit(origins_ms_fc_csf_cols,"_")[[1]])) {
+  pt_samples <- ms_origins_samples[grep(pt,ms_origins_samples)]
+  if(length(pt_samples) == 2){
+    ms_origins_samples_filt <- c(ms_origins_samples_filt, pt_samples)
+  }
+}
+
+ctrl_origins_samples_filt <- c()
+for (pt in unique(tstrsplit(ctrl_fc_csf_cols,"_")[[1]])) {
+  pt_samples <- ctrl_origins_samples[grep(pt,ctrl_origins_samples)]
+  if(length(pt_samples) == 2){
+    ctrl_origins_samples_filt <- c(ctrl_origins_samples_filt, pt_samples)
+  }
+}
+```
+
+### b. MS - CSF/Serum
+```{r}
+ms_origins_plot_df <- origins_all_df[,names(origins_all_df) %in% c("peptide_id",ms_origins_samples_filt)]
+ms_origins_plot_df <- ms_origins_plot_df[ms_origins_plot_df$peptide_id %in% pt_hits_df_top$peptides,]
+row.names(ms_origins_plot_df) <- ms_origins_plot_df$peptide_id
+ms_origins_plot_df$peptide_id <- NULL
+
+# Log10 Transform
+ms_origins_plot_df[ms_origins_plot_df == 0] <- 1
+ms_origins_plot_df <- log10(ms_origins_plot_df)
+
+
+# Only keep peptides with patient overlaps 
+binary_origins_ms <- ms_origins_plot_df
+binary_origins_ms[binary_origins_ms > 0] <- 1
+binary_origins_ms[binary_origins_ms < 1] <- 0
+
+pt_hits_ms_df <- as.data.frame(rowSums(binary_origins_ms))
+names(pt_hits_ms_df) <- "total_pt_hits"
+pt_hits_ms_df$peptides <- row.names(pt_hits_ms_df)
+pt_hits_ms_df$gene     <- tstrsplit(pt_hits_ms_df$peptides,"_")[[1]]
+pt_hits_ms_df$prop_pt_hits <- pt_hits_ms_df$total_pt_hits / ncol(binary_origins_ms)
+
+# Order by CSF Serum
+ordered_ms_origins_samples <- getGroupSampleOrderHeatmapPrePost(plot_df = ms_origins_plot_df,
+                                                                select_samples = ms_origins_samples_filt,
+                                                                regex_pre = "_serum_",regex_post = "_csf_")
+ordered_ms_origins_peptides <- getGroupPeptideOrderHeatmap(plot_df = ms_origins_plot_df,
+                                                         select_samples = ms_origins_samples_filt,
+                                                         select_peptides = pt_hits_df_fig1$peptides)
+
+ms_origins_plot_df <- ms_origins_plot_df[full_clus1_peptides_order,ordered_ms_origins_samples]
+
+
+# Make all neg values = 0
+ms_origins_plot_df_pos <- ms_origins_plot_df
+ms_origins_plot_df_pos[ms_origins_plot_df_pos < 0] <- 0
+```
+
+### c. Healthy Controls CSF/Serum
+```{r}
+ctrl_origins_plot_df <- origins_all_df[,names(origins_all_df) %in% c("peptide_id",ctrl_origins_samples_filt)]
+
+ctrl_origins_plot_df <- ctrl_origins_plot_df[ctrl_origins_plot_df$peptide_id %in% pt_hits_df_top$peptides,]
+row.names(ctrl_origins_plot_df) <- ctrl_origins_plot_df$peptide_id
+ctrl_origins_plot_df$peptide_id <- NULL
+
+# Log10 Transform
+ctrl_origins_plot_df[ctrl_origins_plot_df == 0] <- 1
+ctrl_origins_plot_df <- log10(ctrl_origins_plot_df)
+
+
+# Only keep peptides with patient overlaps 
+binary_origins_ctrl <- ctrl_origins_plot_df
+binary_origins_ctrl[binary_origins_ctrl > 0] <- 1
+binary_origins_ctrl[binary_origins_ctrl < 1] <- 0
+
+pt_hits_ctrl_df <- as.data.frame(rowSums(binary_origins_ctrl))
+names(pt_hits_ctrl_df) <- "total_pt_hits"
+pt_hits_ctrl_df$peptides <- row.names(pt_hits_ctrl_df)
+pt_hits_ctrl_df$gene     <- tstrsplit(pt_hits_ctrl_df$peptides,"_")[[1]]
+pt_hits_ctrl_df$prop_pt_hits <- pt_hits_ctrl_df$total_pt_hits / ncol(binary_origins_ctrl)
+
+# Order by CSF Serum
+ordered_ctrl_origins_samples <- getGroupSampleOrderHeatmapPrePost(plot_df = ctrl_origins_plot_df,
+                                                                select_samples = ctrl_origins_samples_filt,
+                                                                regex_pre = "_serum_",regex_post = "_csf_")
+ordered_ctrl_origins_peptides <- getGroupPeptideOrderHeatmap(plot_df = ctrl_origins_plot_df,
+                                                         select_samples = ctrl_origins_samples_filt,
+                                                         select_peptides = pt_hits_df_fig1$peptides)
+
+ctrl_origins_plot_df <- ctrl_origins_plot_df[full_clus1_peptides_order,ordered_ctrl_origins_samples]
+
+
+# Make all neg values = 0
+ctrl_origins_plot_df_pos <- ctrl_origins_plot_df
+ctrl_origins_plot_df_pos[ctrl_origins_plot_df_pos < 0] <- 0
+```
+
+
+### d. fig 3b - MS + HC 
+```{r}
+sums_3a <- colSums(ms_origins_plot_df_pos)
+sums_3a <- as.data.frame(sums_3a)
+sums_3a$index <- 1:nrow(sums_3a)
+
+# subset first 24 columns
+origins_clus1_subset       <- names(ms_origins_plot_df_pos)[grep("a_",names(ms_origins_plot_df_pos))]
+origins_clus1_subset       <- origins_clus1_subset[1:16]
+ms_origins_plot_df_pos_sub <- ms_origins_plot_df_pos[,names(ms_origins_plot_df_pos) %in% origins_clus1_subset]
+
+ms_ctrl_plot_df <- cbind(ms_origins_plot_df_pos_sub,ctrl_origins_plot_df_pos)
+
+# Column annotations
+fig3b_col_metadata <- as.data.frame(names(ms_ctrl_plot_df))
+names(fig3b_col_metadata) <- "sample"
+row.names(fig3b_col_metadata) <- fig3b_col_metadata$sample
+fig3b_col_metadata$loc <- tstrsplit(fig3b_col_metadata$sample,"_")[[2]]
+fig3b_col_metadata$type <- fig3b_col_metadata$sample
+fig3b_col_metadata$type[fig3b_col_metadata$type %in% names(ms_origins_plot_df_pos_sub)] <- "MS"
+fig3b_col_metadata$type[! fig3b_col_metadata$type %in% "MS"] <- "ctrl"
+fig3b_col_metadata$sample <- NULL
+```
+
+
+# 6. Plots - pheatmap
+
+### a. MS - fig 3a PDF
+```{r,fig.height=5,fig.width=22}
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+# Breaks -2 to 6
+b1 <- seq(-2,1,0.059)
+b2 <- seq(1,6,0.102)
+b2 <- b2[2:length(b2)]
+break_list_fig3 <- c(b1,b2)
+GAPS_MS        <- seq(2,276,by = 2)
+ms_origins_fig3a <- pheatmap(mat = as.matrix(ms_origins_plot_df_pos),
+                             color = COLOR_PAL,breaks = break_list_fig3,
+                             cluster_rows = F, cluster_cols = F, show_colnames = F,
+                             cellwidth = 5,cellheight = 5,fontsize = 6,
+                             main = "MS Serum CSF Log10 foldchange",border_color = NA)
+
+plot_fig3a_fh <- file.path(PLOT_DIR_MAIN,"fig3a_origins.pheatmap.pdf")
+pdf(file = plot_fig3a_fh,height = 5,width = 22)
+ms_origins_fig3a
+dev.off()
+```
+
+### b. MS + HC -fig 3b PDF
+```{r,fig.height=5,fig.width=12}
+# pheatmap - test
+colcolor        <- c("purple","darkgreen")
+names(colcolor) <- c("MS","ctrl")
+colcolor2        <- c("black","grey")
+names(colcolor2) <- c("csf","serum")
+ANNOT_COLORS_3b <- list(loc = colcolor2,type = colcolor)
+
+
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+# Breaks -2 to 6
+b1 <- seq(-2,1,0.059)
+b2 <- seq(1,6,0.102)
+b2 <- b2[2:length(b2)]
+break_list_fig3 <- c(b1,b2)
+GAPS_HC        <- seq(2,(ncol(ms_ctrl_plot_df)-2),by = 2)
+ms_ctrl_origins_fig3b <- pheatmap(mat = as.matrix(ms_ctrl_plot_df),
+                                  annotation_col = fig3b_col_metadata,annotation_colors = ANNOT_COLORS_3b,
+                                  color = COLOR_PAL,breaks = break_list_fig3,gaps_col = GAPS_HC,
+                                  cluster_rows = F, cluster_cols = F, show_colnames = T,
+                                  main = "MS/Controls Serum CSF Log10 foldchange",border_color = NA,
+                                  cellwidth = 8,cellheight = 8,fontsize_col = 5)
+
+plot_fig3b_fh <- file.path(PLOT_DIR_MAIN,"fig3b_origins.pheatmap.pdf")
+pdf(file = plot_fig3b_fh,height = 5,width = 12)
+ms_ctrl_origins_fig3b
+dev.off()
+```
+
+
+# 7. Write Cluster 1/2 metadata Origins
+```{r}
+origins_clus_metadata        <- sums_3a
+names(origins_clus_metadata)[1] <- "sum_rpk_fig1b_peptides"
+origins_clus_metadata$sample <- row.names(origins_clus_metadata)
+
+# Define clusters based on Fig 3b heatmap
+clus1_origins_samples <- origins_clus1_subset[1:8]
+clus2_origins_samples <- origins_clus1_subset[9:16]
+
+# Subset
+origins_clus_metadata <- origins_clus_metadata[origins_clus_metadata$sample %in% origins_clus1_subset,]
+
+# add patient and comparment columns
+origins_clus_metadata$patient <- tstrsplit(origins_clus_metadata$sample,"_")[[1]]
+origins_clus_metadata$compartment <- tstrsplit(origins_clus_metadata$sample,"_")[[2]]
+origins_clus_metadata$cluster     <- origins_clus_metadata$sample
+origins_clus_metadata$cluster[origins_clus_metadata$cluster %in% clus1_origins_samples] <- "cluster 1"
+origins_clus_metadata$cluster[origins_clus_metadata$cluster %in% clus2_origins_samples] <- "cluster 2"
+
+# Final formats
+origins_clus_metadata <- origins_clus_metadata[,c("patient","compartment","sample","sum_rpk_fig1b_peptides","cluster")]
+origins_clus_metadata$patient <- str_replace_all(origins_clus_metadata$patient,"^X","")
+
+### Write CSV to resources
+origins_metadata_fh <- "resources/MASTER_origins_cluster_metadata.csv"
+write.csv(origins_clus_metadata,file = origins_metadata_fh,quote = F,row.names = F)
+```
+
+# ---
+
+# REDO FIG 3a - fig1b peps
+
+# 1. Subset RPK for Fig 3ab
+
+### --temporarily reload df_fc_z
+```{r}
+obj_fh2 <- "objects/Fig3_df_fc_z.RData"
+load(obj_fh2)
+```
+
+# 2. Create sum rpK dataframe of motif peptides
+
+### a. subset origins MS RPK df
+```{r}
+peptides_fig3a    <- row.names(ms_origins_plot_df_pos)
+
+# Subset RPK mtx with the same dimensions
+origins_plot_df_rpk <- df_fc_z[df_fc_z$peptide_id %in% peptides_fig3a,]
+z_cols   <- names(origins_plot_df_rpk)[grep("_Z",names(origins_plot_df_rpk))]
+fc_cols  <- names(origins_plot_df_rpk)[grep("_FC",names(origins_plot_df_rpk))]
+rpk_cols <- str_replace_all(fc_cols,"_FC","")
+origins_plot_df_rpk <- origins_plot_df_rpk[,! names(origins_plot_df_rpk) %in% c(z_cols,fc_cols)]
+origins_plot_df_rpk <- origins_plot_df_rpk[,c("peptide_id",rpk_cols)]
+row.names(origins_plot_df_rpk) <- origins_plot_df_rpk$peptide_id
+origins_plot_df_rpk$peptide_id <- NULL
+
+rm(df_fc_z)
+```
+
+### b. only keep timpoint a
+```{r}
+samples_origins_fig3a <- names(origins_plot_df_rpk)
+samples_origins_fig3a <- samples_origins_fig3a[grep("a_",samples_origins_fig3a)]
+samples_origins_fig3a_ms       <- names(ms_origins_plot_df_pos)
+samples_origins_fig3a_ms <- samples_origins_fig3a_ms[grep("a_",samples_origins_fig3a_ms)]
+
+origins_plot_df_rpk <- origins_plot_df_rpk[,names(origins_plot_df_rpk) %in% samples_origins_fig3a]
+ms_origins_plot_df_pos <- ms_origins_plot_df_pos[,names(ms_origins_plot_df_pos) %in% samples_origins_fig3a_ms]
+```
+
+### c. create Fig 3a - fig1b pep sum RPK df
+```{r}
+origin_samples_ms     <- names(ms_origins_plot_df_pos)
+# only keep tp a
+origin_samples_ms     <- origin_samples_ms[grep("a_",origin_samples_ms)]
+origin_samples_ms_rpk <- str_replace_all(origin_samples_ms,"_FC","")
+
+# Subset MS and OND
+df_rpk_fig3a <- origins_plot_df_rpk_3a[,names(origins_plot_df_rpk_3a) %in% origin_samples_ms_rpk]
+
+#### Only keep fig 1b peptides
+df_rpk_fig3a_motif <- df_rpk_fig3a[row.names(df_rpk_fig3a) %in% fig1b_peptides,]
+
+# Case df
+ms_origins_sum_rpk <- as.data.frame(colSums(df_rpk_fig3a_motif))
+names(ms_origins_sum_rpk) <- "sum_rpk"
+ms_origins_sum_rpk$sample <- row.names(ms_origins_sum_rpk)
+ms_origins_sum_rpk$sample_fc <- paste(ms_origins_sum_rpk$sample,"FC", sep = "_")
+
+# Change levels based on annot bar
+row.names(ms_origins_sum_rpk) <- ms_origins_sum_rpk$sample_fc
+ms_origins_sum_rpk            <- ms_origins_sum_rpk[origin_samples_ms,]
+```
+
+
+
+# 4. motif gradient info
+
+### a. Subset motif peptides
+```{r}
+annot_grad_origins_ms <- ms_origins_sum_rpk
+annot_grad_origins_ms$scaled_count <- log10(annot_grad_origins_ms$sum_rpk + 1)
+row.names(annot_grad_origins_ms) <- annot_grad_origins_ms$sample_fc
+```
+
+### b. create manual color gradient
+```{r}
+color_list    <- inferno(100)
+color_list    <- c(color_list,color_list[100])
+numeric_label <- seq(1,101,1)
+count_brackets <- seq(0,4.4,0.044)
+names(count_brackets) <- numeric_label
+
+# CASE - add numeric annotations to annotation df
+bracket_annot_col <- annot_grad_origins_ms$scaled_count
+for (i in 1:length(bracket_annot_col)) {
+  curr_val <- bracket_annot_col[i]
+  target   <- count_brackets[count_brackets >= curr_val]
+  target   <- target[target == min(target)]
+  bracket  <- names(target)
+  bracket_annot_col[i] <- bracket
+}
+annot_grad_origins_ms$color_bracket <- bracket_annot_col
+```
+
+### c. add to annot bar dfs
+```{r}
+df_annot_bar_origins_ms_motif <- annot_grad_origins_ms
+row.names(df_annot_bar_origins_ms_motif) <- df_annot_bar_origins_ms_motif$sample
+df_annot_bar_origins_ms_motif <- df_annot_bar_origins_ms_motif[,c("sample_fc","sum_rpk","scaled_count","color_bracket")]
+# Add value (CSF = 1, serum = 0)
+value_col <- tstrsplit(df_annot_bar_origins_ms_motif$sample_fc,"_")[[2]]
+value_col[value_col %in% "serum"] <- 0
+value_col[value_col %in% "csf"]   <- 1
+
+df_annot_bar_origins_ms_motif$value <- as.numeric(value_col)
+```
+
+# 5. remake sample annotation bars
+
+### --theme
+```{r}
+WIDTH      = 1.0
+MARGINS    = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND     = c(0.0,0.0)
+label_theme_bar <- theme(axis.line=element_blank(),
+                          axis.text.y=element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank(),
+                          plot.margin = MARGINS)
+
+# Colors, names = brackets
+uni_brackets <- unique(df_annot_bar_origins_ms_motif$color_bracket)
+bar_colors_ms   <- c()
+for (bracket in as.numeric(uni_brackets)) {
+  bar_colors_ms <- c(bar_colors_ms,color_list[bracket])
+}
+names(bar_colors_ms) <- uni_brackets
+```
+
+
+```{r,fig.height=1,fig.width=7}
+plot_annot_bar_origins_ms_motif <- ggplot(df_annot_bar_origins_ms_motif, aes(x = sample_fc, y = value,xmin=0,xmax=length(names(ms_origins_plot_df_pos)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+```
+
+
+# 6. Fig 3a - plot bars colored and format input to heatmap
+
+### --themes
+```{r}
+BAR_THEME_FIG3<- theme(legend.position="none", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title.x=element_blank(),
+                 axis.text=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_text(size=12),
+                 plot.background = element_blank())
+```
+
+
+### a. format ggplot fig 3a dfs
+```{r}
+# Fig 3a heatmap df ggplot
+df_origins_ms_logfc_plot     <- formatPepHeatmapForGGPLOT(heatmap_input = ms_origins_plot_df_pos)
+# Change levels of peptides
+df_origins_ms_logfc_plot$peptide <- factor(df_origins_ms_logfc_plot$peptide,levels = rev(fig1b_peptides))
+
+### Change levels of sum RPK bar
+df_annot_bar_origins_ms_motif$sample_fc <- factor(df_annot_bar_origins_ms_motif$sample_fc,levels = levels(df_origins_ms_logfc_plot$sample))
+```
+
+```{r,fig.height=3,fig.width=14}
+# Colored
+bar_sumrpk_origins_ms_colored <-ggplot(data=df_annot_bar_origins_ms_motif, aes(x=sample_fc, y=sum_rpk,fill=color_bracket)) +
+  geom_bar(stat="identity") + ylim(c(0,24690)) + scale_fill_manual(values = bar_colors_ms) + BAR_THEME_FIG3
+```
+
+
+# 7. Annot bar for origins clusters
+
+```{r}
+# Origins Fig 3a
+df_annot_clus_fig3a<- df_annot_bar_origins_ms_motif[,c("sample_fc","value")]
+df_annot_clus_fig3a$value <- 1
+reg_color_col <- as.character(df_annot_clus_fig3a$sample_fc)
+reg_color_col[reg_color_col %in% clus1_origins_samples] <- "red"
+reg_color_col[reg_color_col %in% clus2_origins_samples] <- "green"
+reg_color_col[! reg_color_col %in% c("red","green")]                  <- "grey"
+df_annot_clus_fig3a$color <- reg_color_col
+df_annot_clus_fig3a$color <- factor(df_annot_clus_fig3a$color,levels = c("red","green","grey"))
+
+# PLOTS
+plot_annot_clus_origins <- ggplot(df_annot_clus_fig3a, aes(x = sample_fc, y = value,fill = color,xmin=0,xmax=nrow(df_annot_clus_fig3a),ymin=0,ymax=1)) + geom_col(width = WIDTH) + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+```
+
+
+# 8. Redo heatmap in ggplot
+
+```{r,fig.height=6,fig.width=14}
+# HEATMAP commands
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100) 
+
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND  = c(0.0,0.0)
+LIMS_ORIG = c(-2, 4)
+LIMS      = c(-2, 5.6)
+label_theme_heatmap_ggplot <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_blank(),
+                                    axis.text.y=element_blank(),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+label_theme_heatmap_ggplot_lab_fig3a <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_text(size = 2,angle = -90),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+# CURRENTLY USED
+updated_gradient_cmd <- scale_fill_gradientn(colours = COLOR_PAL,limits = LIMS)
+
+# Cases
+plot_origins_ms_heatmap <- ggplot(df_origins_ms_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_lab_fig3a
+```
+
+
+# 9. Panel Fig 3a PDF
+```{r,fig.height=6.5,fig.width=14}
+fig3a_origins_ms    <- plot_grid(bar_sumrpk_origins_ms_colored,plot_annot_clus_origins,plot_origins_ms_heatmap,rel_heights = c(1.5,0.5,4.5),align = "v",ncol = 1)
+
+
+plot_fig3a_fh <- file.path(PLOT_DIR_MAIN,"fig3a_origins.pdf")
+pdf(file = plot_fig3a_fh,height = 6.5,width = 14)
+fig3a_origins_ms
+dev.off()
+```
+
+
+# ---
+
+# REDO FIG 3b
+
+# --Only keep timepoint a
+```{r}
+ms_tp_a   <- names(ms_origins_plot_df_pos_sub)
+ctrl_tp_a <- names(ctrl_origins_plot_df_pos)
+
+ms_tp_a   <- ms_tp_a[grep("a_",ms_tp_a)]
+ctrl_tp_a <- ctrl_tp_a[grep("a_",ctrl_tp_a)]
+
+ms_origins_plot_df_pos_sub_a <- ms_origins_plot_df_pos_sub[,names(ms_origins_plot_df_pos_sub) %in% ms_tp_a]
+ctrl_origins_plot_df_pos_a   <- ctrl_origins_plot_df_pos[,names(ctrl_origins_plot_df_pos) %in% ctrl_tp_a]
+
+# Omit select OND patients
+ctrl_pt_sample_vec_fig3b <- names(ctrl_origins_plot_df_pos_a)
+names(ctrl_pt_sample_vec_fig3b) <- tstrsplit(ctrl_pt_sample_vec_fig3b,"_")[[1]]
+names(ctrl_pt_sample_vec_fig3b) <- str_replace_all(names(ctrl_pt_sample_vec_fig3b),"^X","")
+names(ctrl_pt_sample_vec_fig3b) <- str_replace_all(names(ctrl_pt_sample_vec_fig3b),"a","")
+ctrl_samples_fig3b_omit         <- as.character(ctrl_pt_sample_vec_fig3b[names(ctrl_pt_sample_vec_fig3b) %in% omit_df$Patient])
+
+ctrl_origins_plot_df_pos_a <- ctrl_origins_plot_df_pos_a[,! names(ctrl_origins_plot_df_pos_a) %in% ctrl_samples_fig3b_omit]
+```
+
+
+# 1. Subset RPK for MS and CTRL
+```{r}
+samples_origins_ms_fig3b  <- names(ms_origins_plot_df_pos_sub_a)
+samples_origins_ond_fig3b <- names(ctrl_origins_plot_df_pos_a)
+
+samples_origins_ms_fig3b_rpk  <- str_replace_all(samples_origins_ms_fig3b,"_FC","")
+samples_origins_ond_fig3b_rpk <- str_replace_all(samples_origins_ond_fig3b,"_FC","")
+
+# Subset MS and OND
+df_rpk_fig3b_ms  <- origins_plot_df_rpk[,names(origins_plot_df_rpk) %in% samples_origins_ms_fig3b_rpk]
+df_rpk_fig3b_ond <- origins_plot_df_rpk[,names(origins_plot_df_rpk) %in% samples_origins_ond_fig3b_rpk]
+
+#### Only keep fig1b peptides
+df_rpk_fig3b_ms_motif <- df_rpk_fig3b_ms[row.names(df_rpk_fig3b_ms) %in% fig1b_peptides,]
+df_rpk_fig3b_ond_motif <- df_rpk_fig3b_ond[row.names(df_rpk_fig3b_ond) %in% fig1b_peptides,]
+```
+
+# 2. Create sum RPK motif for barplots
+```{r}
+# MS df subset
+ms_origins_sum_rpk_fig3b <- ms_origins_sum_rpk[row.names(ms_origins_sum_rpk) %in% samples_origins_ms_fig3b,]
+ms_origins_sum_rpk_fig3b <- ms_origins_sum_rpk_fig3b[samples_origins_ms_fig3b,]
+
+# OND
+ond_origins_sum_rpk            <- as.data.frame(colSums(df_rpk_fig3b_ond_motif))
+names(ond_origins_sum_rpk)     <- "sum_rpk"
+ond_origins_sum_rpk$sample     <- row.names(ond_origins_sum_rpk)
+ond_origins_sum_rpk$sample_fc  <- paste(ond_origins_sum_rpk$sample,"FC", sep = "_")
+row.names(ond_origins_sum_rpk) <- ond_origins_sum_rpk$sample_fc
+ond_origins_sum_rpk            <- ond_origins_sum_rpk[samples_origins_ond_fig3b,]
+```
+
+
+# 3. motif gradient info
+
+### a. Subset motif peptides
+```{r}
+# MS subset
+annot_grad_origins_ms_fig3b <- ms_origins_sum_rpk_fig3b
+annot_grad_origins_ms_fig3b$scaled_count <- log10(annot_grad_origins_ms_fig3b$sum_rpk + 1)
+row.names(annot_grad_origins_ms_fig3b) <- annot_grad_origins_ms_fig3b$sample_fc
+
+# OND
+annot_grad_origins_ond <- ond_origins_sum_rpk
+annot_grad_origins_ond$scaled_count <- log10(annot_grad_origins_ond$sum_rpk + 1)
+row.names(annot_grad_origins_ond) <- annot_grad_origins_ond$sample_fc
+```
+
+### b. create manual color gradient
+```{r}
+color_list    <- inferno(100)
+color_list    <- c(color_list,color_list[100])
+numeric_label <- seq(1,101,1)
+count_brackets <- seq(0,4.4,0.044)
+names(count_brackets) <- numeric_label
+
+### MS - add numeric annotations to annotation df
+bracket_annot_col <- annot_grad_origins_ms_fig3b$scaled_count
+for (i in 1:length(bracket_annot_col)) {
+  curr_val <- bracket_annot_col[i]
+  target   <- count_brackets[count_brackets >= curr_val]
+  target   <- target[target == min(target)]
+  bracket  <- names(target)
+  bracket_annot_col[i] <- bracket
+}
+annot_grad_origins_ms_fig3b$color_bracket <- bracket_annot_col
+
+### OND
+bracket_annot_col <- annot_grad_origins_ond$scaled_count
+for (i in 1:length(bracket_annot_col)) {
+  curr_val <- bracket_annot_col[i]
+  target   <- count_brackets[count_brackets >= curr_val]
+  target   <- target[target == min(target)]
+  bracket  <- names(target)
+  bracket_annot_col[i] <- bracket
+}
+annot_grad_origins_ond$color_bracket <- bracket_annot_col
+```
+
+### c. add to annot bar dfs
+```{r}
+### MS subset
+df_annot_bar_origins_ms_motif_fig3b <- annot_grad_origins_ms_fig3b
+row.names(df_annot_bar_origins_ms_motif_fig3b) <- df_annot_bar_origins_ms_motif_fig3b$sample
+df_annot_bar_origins_ms_motif_fig3b <- df_annot_bar_origins_ms_motif_fig3b[,c("sample_fc","sum_rpk","scaled_count","color_bracket")]
+# Add value (CSF = 1, serum = 0)
+value_col <- tstrsplit(df_annot_bar_origins_ms_motif_fig3b$sample_fc,"_")[[2]]
+value_col[value_col %in% "serum"] <- 0
+value_col[value_col %in% "csf"]   <- 1
+
+df_annot_bar_origins_ms_motif_fig3b$value <- as.numeric(value_col)
+
+
+### OND
+df_annot_bar_origins_ond_motif <- annot_grad_origins_ond
+row.names(df_annot_bar_origins_ond_motif) <- df_annot_bar_origins_ond_motif$sample
+df_annot_bar_origins_ond_motif <- df_annot_bar_origins_ond_motif[,c("sample_fc","sum_rpk","scaled_count","color_bracket")]
+# Add value (CSF = 1, serum = 0)
+value_col <- tstrsplit(df_annot_bar_origins_ond_motif$sample_fc,"_")[[2]]
+value_col[value_col %in% "serum"] <- 0
+value_col[value_col %in% "csf"]   <- 1
+
+df_annot_bar_origins_ond_motif$value <- as.numeric(value_col)
+```
+
+
+# 4. Format Heatmap dfs MS & OND
+```{r}
+df_origins_ms_logfc_plot_fig3b <- formatPepHeatmapForGGPLOT(heatmap_input = ms_origins_plot_df_pos_sub_a)
+df_origins_ond_logfc_plot      <- formatPepHeatmapForGGPLOT(heatmap_input = ctrl_origins_plot_df_pos_a)
+
+# Change levels of peptides
+df_origins_ms_logfc_plot_fig3b$peptide <- factor(df_origins_ms_logfc_plot_fig3b$peptide,levels = rev(fig1b_peptides))
+df_origins_ond_logfc_plot$peptide <- factor(df_origins_ond_logfc_plot$peptide,levels = rev(fig1b_peptides))
+```
+
+
+# 5. remake sample annotation bars
+
+### a. theme and color brackets
+```{r}
+WIDTH      = 1.0
+MARGINS    = unit(c(0.3, 1, 0.1, 0), "cm") # plot.margin = MARGINS
+EXPAND     = c(0.0,0.0)
+label_theme_bar <- theme(axis.line=element_blank(),
+                          axis.text.y=element_blank(),
+                          axis.text.x=element_blank(),
+                          axis.ticks.y=element_blank(),
+                          axis.ticks.x=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank(),
+                          plot.margin = MARGINS)
+
+
+### MS subset
+uni_brackets <- unique(df_annot_bar_origins_ms_motif_fig3b$color_bracket)
+bar_colors_ms_fig3b   <- c()
+for (bracket in as.numeric(uni_brackets)) {
+  bar_colors_ms_fig3b <- c(bar_colors_ms_fig3b,color_list[bracket])
+}
+names(bar_colors_ms_fig3b) <- uni_brackets
+
+### OND
+uni_brackets <- unique(df_annot_bar_origins_ond_motif$color_bracket)
+bar_colors_ond   <- c()
+for (bracket in as.numeric(uni_brackets)) {
+  bar_colors_ond <- c(bar_colors_ond,color_list[bracket])
+}
+names(bar_colors_ond) <- uni_brackets
+```
+
+### b. change levels and plot
+```{r,fig.height=1,fig.width=7}
+# Change levels bars and heatmap
+df_annot_bar_origins_ms_motif_fig3b$sample_fc <- factor(df_annot_bar_origins_ms_motif_fig3b$sample_fc,levels = df_annot_bar_origins_ms_motif_fig3b$sample_fc)
+df_annot_bar_origins_ond_motif$sample_fc <- factor(df_annot_bar_origins_ond_motif$sample_fc,levels = df_annot_bar_origins_ond_motif$sample_fc)
+# HEATMAPS - Change sample levels
+df_origins_ms_logfc_plot_fig3b$sample <- factor(df_origins_ms_logfc_plot_fig3b$sample,levels = levels(df_annot_bar_origins_ms_motif_fig3b$sample_fc))
+df_origins_ond_logfc_plot$sample <- factor(df_origins_ond_logfc_plot$sample,levels = levels(df_annot_bar_origins_ond_motif$sample_fc))
+
+### MS
+plot_annot_bar_origins_ms_motif_fig3b <- ggplot(df_annot_bar_origins_ms_motif_fig3b, aes(x = sample_fc, y = value,xmin=0,xmax=length(names(ms_origins_plot_df_pos)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+
+### OND
+plot_annot_bar_origins_ond_motif <- ggplot(df_annot_bar_origins_ond_motif, aes(x = sample_fc, y = value,xmin=0,xmax=length(names(ms_origins_plot_df_pos)),ymin=0,ymax=1)) + geom_col(width = WIDTH,color = "black") + scale_y_continuous(limits = c(0, 1),breaks = c(0, 1),expand = EXPAND) + scale_x_discrete(expand=EXPAND) + label_theme_bar
+```
+
+
+# 6. Fig 3b - plot bars colored
+
+### --themes
+```{r}
+BAR_THEME_FIG3<- theme(legend.position="none", 
+                 panel.background=element_blank(),
+                 panel.border=element_rect(fill = NA,colour ="black"),
+                 axis.title.x=element_blank(),
+                 axis.text=element_blank(),
+                 axis.ticks.x=element_blank(),
+                 axis.title.y=element_text(size=12),
+                 plot.background = element_blank())
+```
+
+
+
+
+```{r,fig.height=3,fig.width=14}
+# MS subset
+bar_sumrpk_origins_ms_colored_fig3b <-ggplot(data=df_annot_bar_origins_ms_motif_fig3b, aes(x=sample_fc, y=sum_rpk,fill=color_bracket)) +
+  geom_bar(stat="identity") + ylim(c(0,24690)) + scale_fill_manual(values = bar_colors_ms_fig3b) + BAR_THEME_FIG3
+
+# OND
+bar_sumrpk_origins_ond_colored <-ggplot(data=df_annot_bar_origins_ond_motif, aes(x=sample_fc, y=sum_rpk,fill=color_bracket)) +
+  geom_bar(stat="identity") + ylim(c(0,24690)) + scale_fill_manual(values = bar_colors_ond) + BAR_THEME_FIG3
+```
+
+
+# ---
+
+# 7. Heatmaps in ggplot
+
+```{r}
+# HEATMAP commands
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100) 
+
+WIDTH   = 1.0
+MARGINS = unit(c(0.3, 1, 0.1, 0), "cm") 
+EXPAND  = c(0.0,0.0)
+LIMS_ORIG = c(-2, 4)
+LIMS      = c(-2, 5.6)
+
+label_theme_heatmap_ggplot_lab_fig3b <- theme(panel.grid.major = element_blank(),
+                                    panel.grid.minor = element_blank(),
+                                    panel.background=element_rect(fill="white",color="black"),
+                                    panel.border = element_rect(fill = NA,colour ="black"),
+                                    axis.title.x=element_blank(),
+                                    axis.title.y = element_blank(),
+                                    axis.text.x=element_text(size = 5,angle = -90),
+                                    axis.ticks.x=element_blank(),
+                                    axis.ticks.y=element_blank(),
+                                    plot.margin = MARGINS)
+
+# CURRENTLY USED
+updated_gradient_cmd <- scale_fill_gradientn(colours = COLOR_PAL,limits = LIMS)
+
+### MS subset
+plot_origins_ms_heatmap_fig3b <- ggplot(df_origins_ms_logfc_plot_fig3b, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_lab_fig3b
+
+### OND
+plot_origins_ond_heatmap <- ggplot(df_origins_ond_logfc_plot, aes(x = sample, y = peptide,fill=value)) + geom_tile(width = WIDTH) + updated_gradient_cmd + scale_y_discrete(expand=EXPAND) + guides(fill="none") + scale_x_discrete(expand = EXPAND) + label_theme_heatmap_ggplot_lab_fig3b
+```
+
+
+# 8. Panel Fig 3b PDF
+```{r,fig.height=6.5,fig.width=13}
+# MS panel
+fig3b_origins_ms    <- plot_grid(plot_annot_bar_origins_ms_motif_fig3b,bar_sumrpk_origins_ms_colored_fig3b,plot_origins_ms_heatmap_fig3b,rel_heights = c(0.5,1.5,4.5),align = "v",ncol = 1)
+
+# OND Panel
+fig3b_origins_ond    <- plot_grid(plot_annot_bar_origins_ond_motif,bar_sumrpk_origins_ond_colored,plot_origins_ond_heatmap,rel_heights = c(0.5,1.5,4.5),align = "v",ncol = 1)
+
+# Fig 3b
+fig3b_origins <- plot_grid(fig3b_origins_ms,fig3b_origins_ond,rel_widths = c(4,9),align = "h",ncol = 2)
+
+plot_fig3b_fh <- file.path(PLOT_DIR_MAIN,"fig3b_origins.pdf")
+pdf(file = plot_fig3b_fh,height = 6.5,width = 13)
+print(fig3b_origins)
+dev.off()
+```
+
+# ---
+
+# 9. Make Fig 3b pheatmap
+
+### a. make input dataframes
+```{r}
+df_fig3b_pheat <- cbind(ms_origins_plot_df_pos_sub_a,ctrl_origins_plot_df_pos_a)
+
+# Format column meta data
+annot_metadata_fig3b            <- as.data.frame(names(df_fig3b_pheat))
+names(annot_metadata_fig3b)     <- "type"
+row.names(annot_metadata_fig3b) <- annot_metadata_fig3b$type
+annot_metadata_fig3b$collection <- tstrsplit(annot_metadata_fig3b$type,"_")[[2]]
+
+annot_metadata_fig3b$type[annot_metadata_fig3b$type %in% names(ctrl_origins_plot_df_pos_a)] <- "Ctrl"
+annot_metadata_fig3b$type[annot_metadata_fig3b$type %in% names(ms_origins_plot_df_pos_sub_a)] <- "Case"
+```
+
+
+### b. PDF - Fig 3b pheatmap
+```{r,fig.height=5,fig.width=14}
+# pheatmap - test
+colcolor_3b        <- c("purple","darkgreen")
+names(colcolor_3b) <- c("Case","Ctrl")
+colcolor2_3b        <- c("grey","black")
+names(colcolor2_3b) <- c("serum","csf")
+ANNOT_COLORS_3b <- list(type = colcolor_3b,collection = colcolor2_3b)
+
+COLOR_PAL <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+# Breaks -1 to 4
+break_1 <- seq(-2,1,0.059)  # first 51 breaks
+break_2 <- seq(1,4,0.06)  # last 50 breaks
+break_2 <- break_2[3:length(break_2)]
+break_list1_4 <- c(break_1,break_2)
+# Breaks -2 to 5.6
+breaks_list_3b <- seq(-2,5.6,0.076)
+
+GAPS_3b  <- seq(2,60, by= 2)
+
+fig3b_pheatmap <- pheatmap(mat = as.matrix(df_fig3b_pheat), annotation_col = annot_metadata_fig3b, 
+                            color = COLOR_PAL,breaks = breaks_list_3b,
+                            cluster_rows = F, cluster_cols = F, show_rownames = T,show_colnames = T,
+                            gaps_col = c(GAPS_3b), cellheight = 9,cellwidth = 9,fontsize_row = 10,fontsize_col = 4,
+                            main = "Origins Log10 FC",annotation_colors = ANNOT_COLORS_3b,border_color = NA)
+
+plot_fig3b_v2_fh <- file.path(PLOT_DIR_MAIN,"fig3b_origins.pheatmap.pdf")
+pdf(file = plot_fig3b_v2_fh,height = 5,width = 15)
+fig3b_pheatmap
+dev.off()
+```
+
+
+# ---
+
+# MAKE UMAP MS ORIGINS ONLY
+
+# 1. UMAP - log10 FC
+
+### a. setup up input
+```{r}
+ms_umap_logfc_df <- origins_all_df[,names(origins_all_df) %in% c("peptide_id",origin_samples_ms)]
+row.names(ms_umap_logfc_df) <- ms_umap_logfc_df$peptide_id
+ms_umap_logfc_df$peptide_id <- NULL
+
+# Keep only peptides in Fig 3a
+ms_umap_logfc_df <- ms_umap_logfc_df[row.names(ms_umap_logfc_df) %in% peptides_fig3a,]
+
+# Log10 Transform
+ms_umap_logfc_df[ms_umap_logfc_df == 0] <- 1
+ms_umap_logfc_df <- log10(ms_umap_logfc_df)
+```
+
+### b. Run UMAP
+```{r,fig.height=5,fig.width=6}
+set.seed(12345678)
+
+input_umap_df_fig3 <- as.data.frame(t(ms_umap_logfc_df))
+sample_umap_fig3   <- umap(input_umap_df_fig3, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 1000000,init = "random")
+```
+
+
+# 2. Plot UMAP Fig 3
+
+### a. create color gradient column
+```{r}
+color_bracket_col_fig3 <- row.names(sample_umap_fig3)
+
+# Swap sample names for same color brackets used in heatmap
+bracket_conv_list        <- df_annot_bar_origins_ms_motif$color_bracket
+names(bracket_conv_list) <- df_annot_bar_origins_ms_motif$sample_fc
+bracket_conv_list        <- as.list(bracket_conv_list)
+
+for (i in 1:length(color_bracket_col_fig3)) {
+  curr_val <- color_bracket_col_fig3[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col_fig3[i] <- val_bracket
+}
+
+# Make manual color grad
+uni_brackets_umap_fig3 <- unique(color_bracket_col_fig3)
+bar_colors_umap_fig3   <- c()
+for (bracket in as.numeric(uni_brackets_umap_fig3)) {
+  bar_colors_umap_fig3 <- c(bar_colors_umap_fig3,color_list[bracket])
+}
+names(bar_colors_umap_fig3) <- uni_brackets_umap_fig3
+```
+
+
+### b. PDF - Plot
+
+### --theme
+```{r}
+label_theme_umap_v2 <- theme(axis.line=element_blank(),
+                          axis.title.x=element_blank(),
+                          axis.title.y=element_blank(),
+                          legend.position="none",
+                          panel.background=element_blank(),
+                          panel.border=element_rect(fill = NA,colour ="black"),
+                          panel.grid.major=element_blank(),
+                          panel.grid.minor=element_blank(),
+                          plot.background=element_blank())
+```
+
+### --CSF and Serum
+```{r,fig.height=5,fig.width=7}
+# UMAP Fig 3
+umap_fig3_motif <- tibble(x = sample_umap_fig3[,1],y = sample_umap_fig3[,2],sample = color_bracket_col_fig3) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=3) + scale_color_manual(values = bar_colors_umap_fig3) + label_theme_umap_v2
+
+plot_fig3a_umap_fh <- file.path(PLOT_DIR_MAIN,"fig3a_origins.umap.pdf")
+pdf(file = plot_fig3a_umap_fh,height = 5,width = 7)
+umap_fig3_motif
+dev.off()
+```
+
+
+# 3. Plot UMAP CSF & Serum separately
+
+### a. subset csf and serum
+```{r,fig.height=5,fig.width=7}
+csf_subset <- row.names(sample_umap_fig3)[grep("_csf_",row.names(sample_umap_fig3))]
+serum_subset <- row.names(sample_umap_fig3)[grep("_serum_",row.names(sample_umap_fig3))]
+
+# Subset
+sample_umap_fig3_csf <- sample_umap_fig3[row.names(sample_umap_fig3) %in% csf_subset,]
+sample_umap_fig3_serum <- sample_umap_fig3[row.names(sample_umap_fig3) %in% serum_subset,]
+```
+
+### b. redo color brackets
+```{r}
+color_bracket_col_fig3_csf   <- row.names(sample_umap_fig3_csf)
+color_bracket_col_fig3_serum <- row.names(sample_umap_fig3_serum)
+
+# CSF
+for (i in 1:length(color_bracket_col_fig3_csf)) {
+  curr_val <- color_bracket_col_fig3_csf[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col_fig3_csf[i] <- val_bracket
+}
+# Serum
+for (i in 1:length(color_bracket_col_fig3_serum)) {
+  curr_val <- color_bracket_col_fig3_serum[i]
+  val_bracket <- bracket_conv_list[[curr_val]]
+  color_bracket_col_fig3_serum[i] <- val_bracket
+}
+
+
+## Make manual color grad
+
+# CSF
+uni_brackets_umap_fig3_csf <- unique(color_bracket_col_fig3_csf)
+bar_colors_umap_fig3_csf   <- c()
+for (bracket in as.numeric(uni_brackets_umap_fig3_csf)) {
+  bar_colors_umap_fig3_csf <- c(bar_colors_umap_fig3_csf,color_list[bracket])
+}
+names(bar_colors_umap_fig3_csf) <- uni_brackets_umap_fig3_csf
+
+# Serum
+uni_brackets_umap_fig3_serum <- unique(color_bracket_col_fig3_serum)
+bar_colors_umap_fig3_serum   <- c()
+for (bracket in as.numeric(uni_brackets_umap_fig3_serum)) {
+  bar_colors_umap_fig3_serum <- c(bar_colors_umap_fig3_serum,color_list[bracket])
+}
+names(bar_colors_umap_fig3_serum) <- uni_brackets_umap_fig3_serum
+```
+
+### c. remake PDFs
+```{r,fig.height=5,fig.width=7}
+# UMAP Fig 3 - CSF
+umap_fig3_motif_csf <- tibble(x = sample_umap_fig3_csf[,1],y = sample_umap_fig3_csf[,2],sample = color_bracket_col_fig3_csf) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=3) + scale_color_manual(values = bar_colors_umap_fig3_csf) + label_theme_umap_v2
+
+# UMAP Fig 3 - Serum
+umap_fig3_motif_serum <- tibble(x = sample_umap_fig3_serum[,1],y = sample_umap_fig3_serum[,2],sample = color_bracket_col_fig3_serum) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=3) + scale_color_manual(values = bar_colors_umap_fig3_serum) + label_theme_umap_v2
+
+# PDFs
+plot_fig3a_umap_fh2 <- file.path(PLOT_DIR_MAIN,"fig3a_origins_csf.umap.pdf")
+pdf(file = plot_fig3a_umap_fh2,height = 5,width = 7)
+umap_fig3_motif_csf
+dev.off()
+
+plot_fig3a_umap_fh3 <- file.path(PLOT_DIR_MAIN,"fig3a_origins_serum.umap.pdf")
+pdf(file = plot_fig3a_umap_fh3,height = 5,width = 7)
+umap_fig3_motif_serum
+dev.off()
+```
+
+
+# 4. Plot Cluster UMAPs CSF and Serum
+
+### a. create color columns
+```{r}
+df_umap_fig3 <- as.data.frame(sample_umap_fig3)
+names(df_umap_fig3) <- c("x","y","z")
+
+# add relevant columns
+df_umap_fig3$patient <- row.names(df_umap_fig3)
+df_umap_fig3$patient <- str_replace_all(df_umap_fig3$patient,"_cgorigins_FC","")
+df_umap_fig3$compartment <- tstrsplit(df_umap_fig3$patient,"_")[[2]]
+
+df_umap_fig3$cluster <- row.names(df_umap_fig3)
+df_umap_fig3$cluster[df_umap_fig3$cluster %in% clus1_origins_samples] <- "Cluster 1"
+df_umap_fig3$cluster[df_umap_fig3$cluster %in% clus2_origins_samples] <- "Cluster 2"
+df_umap_fig3$cluster[! df_umap_fig3$cluster %in% c("Cluster 1","Cluster 2")] <- "Remaining"
+
+dot_clus_colors_fig3 <- c("red","purple","black")
+names(dot_clus_colors_fig3) <- c("Cluster 1","Cluster 2","Remaining")
+```
+
+### b. subset dots to label
+```{r}
+outlier_df_fig3    <- df_umap_fig3[df_umap_fig3$cluster %in% c("Cluster 1","Cluster 2"),]
+```
+
+### b. re-make plot
+```{r,fig.height=5,fig.width=7}
+umap_fig3_clus <- ggplot(df_umap_fig3,aes(x = x,y = y,col=cluster)) + 
+  geom_point(size=1) + scale_color_manual(values = dot_clus_colors_fig3) + 
+  geom_text_repel(data=outlier_df_fig3,aes(x,y,label=patient),hjust = -0.5, nudge_x = 0.25, show.legend = FALSE,size =2,max.overlaps = 50) + 
+  label_theme_umap_v2
+
+
+plot_fig3a_umap_fh2 <- file.path(PLOT_DIR_MAIN,"fig3a_origins.umap.Cluster.pdf")
+pdf(file = plot_fig3a_umap_fh2,height = 5,width = 7)
+umap_fig3_clus
+dev.off()
+```
+
+
+# -------------------------------------
+
+# FIGURE 3 - Exploratory
+
+# REDO UMAPS
+
+# 1. CSF and Serum separately
+```{r,fig.height=5,fig.width=6}
+set.seed(456781)
+
+input_samples       <- row.names(input_umap_df_fig3)
+input_samples_csf   <- input_samples[grep("_csf_",input_samples)]
+input_samples_serum <- input_samples[grep("_serum_",input_samples)]
+
+csf_input_umap_df_fig3 <- input_umap_df_fig3[row.names(input_umap_df_fig3) %in% input_samples_csf,]
+serum_input_umap_df_fig3 <- input_umap_df_fig3[row.names(input_umap_df_fig3) %in% input_samples_serum,]
+
+# Re-cluster CSF and Serum
+sample_csf_umap_fig3   <- umap(csf_input_umap_df_fig3, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 1000000,init = "random")
+sample_serum_umap_fig3   <- umap(serum_input_umap_df_fig3, n_neighbors = 20,n_components = 3, 
+                         learning_rate = 1, n_epochs = 1000000,init = "random")
+```
+
+
+# 2. Re-make UMAPs
+
+### a. remake plots
+```{r,fig.height=5,fig.width=7}
+# UMAP Fig 3 - CSF
+umap_fig3_motif_csf_reclus <- tibble(x = sample_csf_umap_fig3[,1],y = sample_csf_umap_fig3[,2],sample = color_bracket_col_fig3_csf) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=3) + scale_color_manual(values = bar_colors_umap_fig3_csf) + label_theme_umap_v2
+
+# UMAP Fig 3 - Serum
+umap_fig3_motif_serum_reclus <- tibble(x = sample_serum_umap_fig3[,1],y = sample_serum_umap_fig3[,2],sample = color_bracket_col_fig3_serum) %>% ggplot(aes(x = x,y = y,col=sample)) + geom_point(size=3) + scale_color_manual(values = bar_colors_umap_fig3_serum) + label_theme_umap_v2
+```
+
+### b. PDFs
+```{r}
+# PDFs
+plot_fig3a_umap_fh4 <- file.path(PLOT_DIR_MAIN,"fig3a_origins_csf.umap.Reclustered.pdf")
+pdf(file = plot_fig3a_umap_fh4,height = 5,width = 7)
+umap_fig3_motif_csf_reclus
+dev.off()
+
+plot_fig3a_umap_fh5 <- file.path(PLOT_DIR_MAIN,"fig3a_origins_serum.umap.Reclustered.pdf")
+pdf(file = plot_fig3a_umap_fh5,height = 5,width = 7)
+umap_fig3_motif_serum_reclus
+dev.off()
+```
+
+# 3. Subset outliers
+```{r}
+outlier_csf_df <- as.data.frame(sample_csf_umap_fig3)
+outlier_csf_df <- outlier_csf_df[outlier_csf_df$V1 < -1.9,]
+outlier_csf_df <- outlier_csf_df[outlier_csf_df$V2 > 0.5,]
+
+
+outlier_serum_df <- as.data.frame(sample_serum_umap_fig3)
+outlier_serum_df <- outlier_serum_df[outlier_serum_df$V1 > 0.6,]
+outlier_serum_df <- outlier_serum_df[outlier_serum_df$V2 > 1,]
+```
+
+
+# -------------------------------------
+
+# Write UMAP coords
+```{r}
+# Fig 1 UMAP 
+fh_umap_fig1 <- file.path(TABLE_DIR_MAIN,"table_umap_coords_fig1.csv")
+write.csv(sample_tiny_umap,file = fh_umap_fig1,quote = F,row.names = T)
+
+# FIG 3 UMAP
+fh_umap_fig3 <- file.path(TABLE_DIR_MAIN,"table_umap_coords_fig3.csv")
+write.csv(sample_umap_fig3,file = fh_umap_fig3,quote = F,row.names = T)
+```
+
+# Fig 1b Peptides table
+```{r}
+pep_df_fig1b <- top_candidates[,c("peptide_id","peptide","gene","sequence")]
+pep_df_fig1b <- pep_df_fig1b[pep_df_fig1b$peptide_id %in% fig1b_peptides,]
+
+fh_fig1b_peps <- file.path(TABLE_DIR_MAIN,"table_fig1b_26_peptides.csv")
+write.csv(pep_df_fig1b,file = fh_fig1b_peps,quote = F,row.names = F)
+```
+
+
+# SAVE ENV
+
+```{r}
+curr_env_fh <- "objects/ENV_PLOTS.RData"
+
+save(list = ls(),file = curr_env_fh)
+```
+

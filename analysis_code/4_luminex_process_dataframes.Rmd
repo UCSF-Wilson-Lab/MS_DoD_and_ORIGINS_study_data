@@ -1,0 +1,319 @@
+---
+title: "Luminex - Process Data"
+output: html_document
+---
+
+
+# START
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggpubr)
+library(PairSeq)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(janitor)
+library(Biostrings)
+library(pheatmap)
+library(RColorBrewer)
+library(viridis)
+library(gplots)
+library(wesanderson)
+library(treemapify)
+library(ComplexHeatmap)
+library(png)
+library(ggplot2) 
+library(cowplot)
+library(ggrepel)
+library(plotly) 
+library(uwot)
+library(gridExtra)
+library(seqinr)
+library(DECIPHER)
+library(Biostrings)
+library(text.alignment)
+
+ANTIGEN_LIST <- c("CLASRP","RIMS2","HFM","EBV BRRF2","KRT75","SRRM3","TRIO","BSA","CD320 epitope","Aspergillus","SRSF4","E. Coli","Pseudomonas","EBV ENV")
+
+# PATH to our local project directory is not provided
+setwd("[PATH to project folder]")
+
+# Revised luminex data
+luminex_data_dir <- "Luminex_Data/All_runs_with_repeats_included/Net_MFI_only"
+
+# Diagnosis metadata
+metadata <- read.csv("data_origins/ORIGINSEPICPatientSamples.csv",stringsAsFactors = F) %>% clean_names()
+
+# Plot ENV RData from the manuscript
+full_plot_env_fh <- "objects/ENV_PLOTS.RData"
+
+# NIDs to keep 
+nids_to_keep_metadata_fh     <- "resources/revisions_luminex/NIDs_to_keep_luminex_metadata.csv"
+nids_to_keep_metadata        <- read.csv(nids_to_keep_metadata_fh,stringsAsFactors = F)
+nids_to_keep_metadata$Sample <- str_replace_all(nids_to_keep_metadata$Sample," ","_")
+nids_to_keep_metadata        <- nids_to_keep_metadata[nids_to_keep_metadata$metadata %in% "y",]
+
+# Results Directories
+PLOT_DIR   <- "plots"
+TABLE_DIR  <- "Luminex_Data/processed_luminex_tables"
+
+# Output object to save
+output_origins_variables_fh <- file.path(TABLE_DIR,"origins_variables_for_plots.RData")
+```
+
+
+# FUNCTIONS
+
+### loadMFIfile
+```{r}
+loadMFIfile <- function(file_name,dir_path) {
+  batch <- str_replace_all(file_name,".csv","")
+  batch <- str_replace_all(batch,".NetMFI","")
+  
+  mfi_df <- read.csv(file.path(dir_path,file_name),stringsAsFactors = F,check.names = F)
+  mfi_df$batch <- batch
+  
+  return(mfi_df)
+}
+```
+
+### collapseReplicatesLuminex
+* Input should be BSA scaled luminex counts
+```{r}
+collapseReplicatesLuminex <- function(unique_id,lux_df_norm,antigen_cols,unique_id_col,plate_col) {
+  lux_df_sub <- lux_df_norm[lux_df_norm[,unique_id_col] %in% unique_id,]
+  lux_df_antigens <- lux_df_sub[,names(lux_df_sub) %in% antigen_cols]
+  entry_df <- (colSums(lux_df_antigens)/nrow(lux_df_antigens)) %>% as.data.frame() %>% t() %>% as.data.frame()
+  
+  entry_df$Sample <- unique_id
+  
+  plate <- sort(unique(lux_df_sub[,plate_col]))
+  if(length(plate) > 1){plate <- paste(plate,collapse = ":")}
+  entry_df$Plate <- plate
+  
+  # re-order
+  entry_df <- entry_df[,c("Sample","Plate",antigen_cols)]
+  
+  return(entry_df)
+}
+```
+
+# -------------------------------------
+
+# COMBINE ALL NEW LUMINEX DATA
+
+* Prior to running this code, CSVs were pre-processed manaully to get MFI data only
+
+# 1. Merge all CSVs
+```{r}
+file_list <- list.files(luminex_data_dir) %>% as.list()
+df_list   <- lapply(file_list, loadMFIfile,dir_path=luminex_data_dir)
+lux_df    <- do.call("rbind",df_list)
+```
+
+# 2. Add info columns
+
+### a. Plate
+```{r}
+# Plate columns
+plate_col <- lux_df$batch
+plate_col <- tstrsplit(plate_col,"_")[[1]]
+plate_col <- str_replace_all(plate_col,"updated","")
+plate_col[plate_col %in% "rerun"] <- "MixedPlate"
+plate_col[plate_col %in% "JP"] <- "ExtraPlate"
+lux_df$plate <- plate_col
+```
+
+### b. Sample formatted and Unique ID
+```{r}
+# Formatted Samples
+sample_fmt_col <- lux_df$Sample
+sample_fmt_col <- str_replace_all(sample_fmt_col," ","_")
+lux_df$sample_fmt <- sample_fmt_col
+
+# Unique ID to separate replicates
+lux_df$unique_id  <- tstrsplit(lux_df$sample_fmt,"_rep")[[1]]
+
+replicate_summary <- table(lux_df$unique_id) %>% as.data.frame()
+names(replicate_summary) <- c("unique_id","count")
+```
+
+# 3. Omit first run samples that were repeated
+```{r}
+lux_df$index <- as.character(1:nrow(lux_df))
+
+repeat_samples <- lux_df$sample_fmt[grep("repeat",lux_df$sample_fmt)]
+uni_ids_with_repeats <- lux_df[lux_df$sample_fmt %in% repeat_samples,"unique_id"] %>% unique()
+
+replicate_summary_w_rep <- replicate_summary[replicate_summary$unique_id %in% uni_ids_with_repeats,]
+
+ids_to_check <- replicate_summary_w_rep[replicate_summary_w_rep$count !=2,"unique_id"] %>% as.character()
+
+rows_to_omit <- c()
+for (uni_id in ids_to_check) {
+  pt_sub <- lux_df[lux_df$unique_id %in% uni_id,]
+  target_samples <- pt_sub$sample_fmt[grep("repeat",pt_sub$sample_fmt)]
+  omit_samples   <- pt_sub$sample_fmt[! pt_sub$sample_fmt %in% target_samples]
+  rows_to_omit <- c(rows_to_omit,omit_samples)
+}
+lux_df <- lux_df[! lux_df$sample_fmt %in% rows_to_omit,]
+```
+
+# 4. BSA normalize
+* Divide all antigens by BSA
+```{r}
+lux_df_norm <- lux_df
+
+bsa_values <- lux_df_norm$BSA
+
+for (a in ANTIGEN_LIST) {
+  lux_df_norm[,a] <- lux_df_norm[,a] / bsa_values
+}
+```
+
+
+# 5. Collapse duplicates
+* average replicates
+* Take log of average values
+* Sum MFI and avg MFI are done across all antigens post averaging replicates. Log scaling is done after.
+```{r}
+id_list <- unique(lux_df_norm$unique_id) %>% as.list()
+
+df_norm_list <- lapply(id_list, collapseReplicatesLuminex,lux_df_norm=lux_df_norm,
+                       antigen_cols=ANTIGEN_LIST,
+                       unique_id_col="unique_id",plate_col="plate")
+
+lux_df_fin <- do.call("rbind",df_norm_list)
+```
+
+# 6. Sum/Avg MFI 
+
+### a. autoantigens
+```{r}
+lux_df_fin$pep_sum_mfi <- lux_df_fin$SRSF4 + lux_df_fin$KRT75 + lux_df_fin$RIMS2 + lux_df_fin$TRIO + lux_df_fin$CLASRP + lux_df_fin$SRRM3
+
+lux_df_fin$pep_sum_mfi_no_SRRM3 <- lux_df_fin$SRSF4 + lux_df_fin$KRT75 + lux_df_fin$RIMS2 + lux_df_fin$TRIO + lux_df_fin$CLASRP
+
+lux_df_fin$pep_mean_mfi <- (lux_df_fin$SRSF4 + lux_df_fin$KRT75 + lux_df_fin$RIMS2 + lux_df_fin$TRIO + lux_df_fin$CLASRP + lux_df_fin$SRRM3) / 6
+```
+
+### b. pathogens
+```{r}
+lux_df_fin$pep_sum_mfi_pathogens <- lux_df_fin$`EBV BRRF2` + lux_df_fin$`EBV ENV` + lux_df_fin$Aspergillus + lux_df_fin$`E. Coli` + lux_df_fin$Pseudomonas + lux_df_fin$HFM
+
+lux_df_fin$pep_mean_mfi_pathogens <- (lux_df_fin$`EBV BRRF2` + lux_df_fin$`EBV ENV` + lux_df_fin$Aspergillus + lux_df_fin$`E. Coli` + lux_df_fin$Pseudomonas + lux_df_fin$HFM) / 6
+```
+
+
+# 7. Log Scale
+```{r}
+lux_df_fin_log <- lux_df_fin
+
+for (a in c(ANTIGEN_LIST,"pep_sum_mfi","pep_sum_mfi_no_SRRM3","pep_mean_mfi","pep_sum_mfi_pathogens","pep_mean_mfi_pathogens")) {
+  lux_df_fin_log[,a] <- log((lux_df_fin_log[,a] + 1))
+}
+```
+
+# 6. Write TSVs
+```{r}
+write.table(lux_df,file = file.path(TABLE_DIR,"Full_Luminex_revised_df.unprocessed.tsv"),sep = "\t",quote = F,row.names = F)
+
+write.table(lux_df_fin,file = file.path(TABLE_DIR,"Luminex_revised_processed_df.tsv"),sep = "\t",quote = F,row.names = F)
+
+write.table(lux_df_fin_log,file = file.path(TABLE_DIR,"Luminex_revised_processed_df.log.tsv"),sep = "\t",quote = F,row.names = F)
+```
+
+
+# -------------------------------------
+
+# PREPARE FOR PLOT
+
+# 1. filter for samples in the study
+```{r}
+lux_df_plot <- lux_df_fin_log
+
+# Remove extra plate but keep select NIDs
+lux_df_plot_nid <- lux_df_plot[lux_df_plot$Plate %in% "ExtraPlate",]
+nids_to_keep_metadata$SampleFormatted <- tstrsplit(nids_to_keep_metadata$Sample,"_rep")[[1]]
+
+# List samples to keep in plot dataframe
+samples_to_keep_nid <- lux_df_plot_nid$Sample[lux_df_plot_nid$Sample %in% nids_to_keep_metadata$SampleFormatted]
+samples_to_keep <- lux_df_plot[! lux_df_plot$Plate %in% "ExtraPlate","Sample"]
+
+lux_df_plot     <- lux_df_plot[lux_df_plot$Sample %in% c(samples_to_keep_nid,samples_to_keep),]
+
+# Remove plate controls
+plate_cntrls <- lux_df_plot$Sample[grep("Plate|Control|Secondary",lux_df_plot$Sample)]
+lux_df_plot         <- lux_df_plot[! lux_df_plot$Sample %in% plate_cntrls,]
+lux_df_plot$Patient <- tstrsplit(lux_df_plot$Sample,"_")[[1]]
+lux_df_plot$fluid     <- tstrsplit(lux_df_plot$Sample,"_")[[2]]
+lux_df_plot$fluid[lux_df_plot$fluid %in% c("1:1","CSF")] <- "csf"
+```
+
+# 2. Add in diagnosis
+```{r}
+ond_ids  <- read.csv("data_origins/OND_ID_list.csv",stringsAsFactors = F)
+ond      <- ond_ids$ID
+ond      <- unique(ond)
+
+colnames(metadata)[1] <- "Patient"
+bare_bones <- metadata %>% select(Patient, disease_status,final_diagnosis, epicid)
+
+# Keep track of non-overlapping IDs
+missing_ids <- lux_df_plot$Patient[! lux_df_plot$Patient %in% bare_bones$Patient] %>% unique()
+
+lux_df_plot <- left_join(lux_df_plot, bare_bones, by = "Patient")
+
+# Merge final diagnosis with fluid
+lux_df_plot$final_diagnosis <- paste(lux_df_plot$final_diagnosis, lux_df_plot$fluid, sep = "_")
+```
+
+# 3. Create Long df
+
+### a. plot df
+```{r}
+anitgen_list_filt <- ANTIGEN_LIST[! ANTIGEN_LIST %in% c("BSA","CD320 epitope")]
+
+lux_df_long <- lux_df_plot[, c("Patient", "final_diagnosis",anitgen_list_filt)] %>% gather(key = "bead", value = "mfi", -Patient, - final_diagnosis)
+```
+
+### b. NID
+```{r}
+lux_df_long_nid <- lux_df_plot_nid[, c("Sample",anitgen_list_filt)] %>% gather(key = "bead", value = "mfi", -Sample)
+```
+
+# 4. Write TSVs
+
+### a. Plot Dataframes
+```{r}
+write.table(lux_df_plot,file = file.path(TABLE_DIR,"plot_df_Luminex_revised_processed.tsv"),sep = "\t",quote = F,row.names = F)
+
+write.table(lux_df_long,file = file.path(TABLE_DIR,"long_plot_df_Luminex_revised_processed.tsv"),sep = "\t",quote = F,row.names = F)
+```
+
+### b. NID
+```{r}
+write.table(lux_df_plot_nid,file = file.path(TABLE_DIR,"NID_plot_df_Luminex_revised_processed.tsv"),sep = "\t",quote = F,row.names = F)
+
+write.table(lux_df_long_nid,file = file.path(TABLE_DIR,"NID_long_plot_df_Luminex_revised_processed.tsv"),sep = "\t",quote = F,row.names = F)
+```
+
+# -------------------------------------
+
+# GET ORIGINS VARIABLE TO KEEP FOR PLOTS
+
+* This does not account for the fact that one patient was later diagnosed with MS
+
+# 1. Load full Plot ENV
+```{r}
+load(full_plot_env_fh)
+```
+
+# 3. SAVE
+```{r}
+save(samples_origins_ms_fig3b,patients_origins_cluster,pts_to_omit,
+     samples_fig3a,pt_ms_fig3a,samples_ctrl_fig3b,pt_ctrl_fig3b,file = output_origins_variables_fh)
+```
+
